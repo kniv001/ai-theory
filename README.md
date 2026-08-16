@@ -15,11 +15,12 @@
 
 | 文件 | 作用 |
 |---|---|
+| **[OVERVIEW.md](OVERVIEW.md)** | **框架总论（单一事实源入口）——先读这里** |
 | [GOAL.md](GOAL.md) | 锚定目标：北极星、红线、设计约束、里程碑、验收标准、非目标 |
 | [CONJECTURES.md](CONJECTURES.md) | 猜想台账与剪枝日志（所有未验证假设的单一事实源） |
 | [TOOLCHAIN.md](TOOLCHAIN.md) | 工具记录：推理 / 文献 / 形式化 / 仿真 |
 | [SESSION.md](SESSION.md) | 会话日志：每轮结论与下一步 |
-| [theory/](theory/) | 理论正文（M1 起按主题建立） |
+| [theory/](theory/) | 理论正文（各轮细节，19 篇） |
 
 ## 里程碑
 
