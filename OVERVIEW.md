@@ -152,6 +152,7 @@ $$\dot{z} = -(\gamma + i\omega)z + D(t), \qquad z \in \mathbb{C}$$
 
 ## 13. 文档地图
 
-- [GOAL.md](GOAL.md) 锚定与红线 | [CONJECTURES.md](CONJECTURES.md) 猜想台账（153 条）
-- [SESSION.md](SESSION.md) 轮次日志（121 轮）| [TOOLCHAIN.md](TOOLCHAIN.md) 工具
-- [theory/](theory/) 各轮细节（121 篇）
+- [GOAL.md](GOAL.md) 锚定与红线 | [CONJECTURES.md](CONJECTURES.md) 猜想台账（167 条 + 层级总览）
+- [LAYERS.md](LAYERS.md) 结构衔接（L0-L3 定义 + 现象表达式——社会域已完成）
+- [SESSION.md](SESSION.md) 轮次日志（138 轮）| [TOOLCHAIN.md](TOOLCHAIN.md) 工具
+- [theory/](theory/) 各轮细节（138 篇）
