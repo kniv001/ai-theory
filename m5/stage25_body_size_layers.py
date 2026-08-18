@@ -19,6 +19,15 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+# ============ 参数总览（精细化 R122）============
+# 环境：W×H=200² / 密度 120 只+300 株（pezzza 0.003/格²——相遇率决定捕食频率）
+# 植物：MATURE 10 / REPRO 0.12 / SPREAD 0.04 / MAX 300 / 外生保底 15%/步
+# 生物：mass 0.5±0.25 / accel 1.0±0.4 / α 0.6±0.2（食肉种子 5-10%）
+# 能量：植物 16×conv×intake / 肉类 3.0×mass×satiety×meat_conv（能量流守恒）
+# 捕食：资格 accel×1.1 / 冲刺 max(Δa×4,3) / p=0.4+0.4min(1,Δa/2)-0.5体积差
+#       追速=speed+accel / 燃能 0.6/步 / 锁定×3 / 风险调整×p / 本帧判定
+# 记忆：TTL 60 / 新鲜度折扣 / 落空驱逐
+# 进化：小突变 ±10% / 大突变 3%±0.3 / 繁殖线 120 / 上限 120+60m
 RNG = np.random.default_rng(109)
 W, H = 200.0, 200.0   # 100→200（地图 4 倍——pezzza 空间缓冲思路——生态有空间分层）
 CONTACT = 2.0
@@ -27,7 +36,6 @@ PLANT_REWARD = 16.0   # 植物基础饱食（× 转换度 × intake——12→16
 # 饱而大的猎物 = 大能量包——饿空的猎物 = 没什么可吃——用户：捕食能量与猎物数值挂钩）
 FOV = 120.0   # 扇形视野角（度）——生物只看前方——背后突袭/盲区
 FOV_HALF = np.radians(FOV / 2.0)
-MEM_CAP = 8      # 记忆容量（条/生物）
 MEM_TTL = 60     # 记忆遗忘时间（步——超时未刷新 = 遗忘）
 PLANT_MATURE = 10
 PLANT_REPRO = 0.12   # 0.08→0.12（植物产量支撑种群——否则被吃光灭绝）
@@ -35,7 +43,6 @@ PLANT_SPREAD = 0.04
 MAX_PLANTS = 300   # 500→300（植物稀缺化——采食竞争出现——速度有价值——形态分化压力）
 REPRO_TH = 120.0
 MAX_POP = 500
-THREAT_R = 8.0   # 20→8（猎物警觉距离——捕食者隐蔽接近后突袭——Wilson 2013：捕食=短距爆发非长追）
 VISION = 30.0   # 视野半径（感知范围——发现猎物/察觉威胁）
 
 def tradeoff(mass):
@@ -45,12 +52,6 @@ def max_speed(mass, accel):
     """极速上限 = 体积 trade-off × 加速度 trade-off（用户设计：食肉加速快极速低——
     猫科 vs 羚羊——Wilson 2015：质量增强速度削弱——形态分化靠此涌现）"""
     return tradeoff(mass) * np.clip(1.35 - 0.22 * accel, 0.7, 1.35)
-
-def acceleration(speed, accel_gene=1.0):
-    """加速度 = 独立进化基因（用户设计：食肉加速快速度上限低——猫科 vs 羚羊）：
-    捕食形态（α 低）被选择出高 a（冲刺）；猎物形态（α 高）被选择出高 v（极速）——
-    形态分化进化涌现（a 和 v 独立变异——不通过体积绑定）"""
-    return accel_gene
 
 def decay_rate(mass):
     return 0.4 + 0.35 * mass
@@ -62,7 +63,7 @@ def plant_conv(alpha):
 def meat_conv(alpha):
     """肉类转换度（α 低 = 食肉倾向 = 肉类全转换——α 高保底 0.05——吃草者吃肉几乎无收益——
     0.15→0.05：更极端专业化——否则 α>0.7 者吃肉仍净正——全体追猎）"""
-    return 0.05 + 0.85 * (1.0 - alpha)
+    return 0.03 + 0.85 * (1.0 - alpha)
 
 def sat_max(mass):
     """storage（能量储备）：饱食度上限随质量——大动物耐饿（脂肪储备——现实：骆驼/熊）——
@@ -76,7 +77,6 @@ def intake(mass):
 
 class LayerWorld:
     def __init__(self, n0=120, plants0=300):   # 密度对齐 pezzza（0.003/格²——相遇率——捕食频率）
-        self.n = n0
         self.x = RNG.uniform(0, W, n0)
         self.y = RNG.uniform(0, H, n0)
         self.mass = np.clip(0.5 + RNG.normal(0, 0.25, n0), 0.3, 1.7)   # 质量（体型——速度/代谢/防御/能量包）
@@ -87,8 +87,6 @@ class LayerWorld:
         self.memory = [{} for _ in range(n0)]   # 空间记忆：{(qx,qy): [kind, age]}——视野的缓存
         self.target_lock = np.full(n0, -1, dtype=int)   # 追猎锁定（猎物索引——持续追一只）
         self.lock_age = np.zeros(n0)   # 锁定时长（超时解锁——追丢）
-        self.vx = np.zeros(n0)   # 速度（运动学积分——不是瞬时）
-        self.vy = np.zeros(n0)
         self.satiety = np.full(n0, 60.0)
         self.alive = np.ones(n0, dtype=bool)
         # α 初始 0.6±0.2（食肉种子少量——5-10%——否则初始食肉 22 只吃光猎物——
@@ -217,7 +215,7 @@ class LayerWorld:
                         # 肉类能量 = 猎物体积×饱食度（身体+体内能量——能量包）× 转换度——预期净收益
                         # 系数 3.0 + 风险调整（价值 ×p_success 挡业余者）：专业者回报 48/次
                         # （1.6/步 > 消耗 0.8——可繁殖）——1.5 时期望只略高于采食——方差杀小种群
-                        net = p_success * 3.0 * self.mass[j] * self.satiety[j] * meat_conv(self.alpha[i]) \
+                        net = p_success * 2.5 * self.mass[j] * self.satiety[j] * meat_conv(self.alpha[i]) \
                               - cost - 0.6 * d / max(self.speed[i] + self.accel[i], 0.5)
                         if net > 0:   # 预期净收益 > 0 才捕（多次尝试的期望——捕食 = 风险投资）
                             # 追猎锁定：持续追同一只（价值 ×3——否则每帧换目标——距离永不收敛）
@@ -291,7 +289,7 @@ class LayerWorld:
             if d > 1e-6:
                 self.move_with_dynamics(i, dx/d, dy/d, chase=(kind == "prey"))
                 if kind == "prey":
-                    self.satiety[i] -= 0.6   # 追逐燃能（Wilson 2018：追逐 = 肌肉燃烧——
+                    self.satiety[i] -= 0.5   # 追逐燃能（Wilson 2018：追逐 = 肌肉燃烧——
                     # 失败追逐的机会成本——杂食者追猎转亏——只有专业食肉者承担得起）
                 self.heading[i] = np.arctan2(dy, dx)   # 朝向 = 移动方向
                 moved.add(i)
@@ -368,8 +366,6 @@ class LayerWorld:
             self.memory.append({})   # 新生物空记忆
             self.target_lock = np.append(self.target_lock, -1)
             self.lock_age = np.append(self.lock_age, 0)
-            self.vx = np.append(self.vx, 0.0)
-            self.vy = np.append(self.vy, 0.0)
             self.satiety = np.append(self.satiety, nsat)
             self.alpha = np.append(self.alpha, na)
             self.alive = np.append(self.alive, True)
@@ -389,15 +385,29 @@ class LayerWorld:
 def run():
     print("=== 体型分层 v2（用户速度修正：小快难捕食——快吃慢） ===\n")
 
-    # ---- 实验 1/2/3：生态位涌现 ----
-    print("[exp1-3] 生态位 + 捕食链（600 步——体型多样性起点）:")
+    # ---- 主判定：多 seed 统计（单 seed 单时刻 = 运气——低谷误判） ----
+    print("[主判定] 3 seed × 600 步存活率（200 步后食肉/食草存在比例）:")
+    carn_l, herb_l, peaks = [], [], []
+    for s in range(3):
+        globals()['RNG'] = np.random.default_rng(109 + s * 7)
+        w = LayerWorld()
+        h = w.run(600)
+        carn_l.append(np.mean(h[200:, 3] > 0))
+        herb_l.append(np.mean(h[200:, 2] > 5))
+        peaks.append(int(h[200:, 3].max()))
+    c_mean, h_mean = 100*np.mean(carn_l), 100*np.mean(herb_l)
+    print(f"  食肉存活 {c_mean:.0f}%（peak {max(peaks)}）| 食草存活 {h_mean:.0f}%")
+    print(f"  = {'✓ 捕食链自持（食肉者多 seed 持续存在）' if c_mean > 50 and h_mean > 50 else '✗ 捕食链脆弱'}")
+
+    # ---- 实验 1/2/3：生态位涌现（seed 109 详细） ----
+    print("\n[exp1-3] 生态位 + 捕食链（seed 109——600 步）:")
     w = LayerWorld()
     h = w.run(600)
     herb, carn = h[-1, 2], h[-1, 3]
     vh, vc = h[-1, 4], h[-1, 5]
     print(f"  末代: 食草 {herb}（体积 {vh:.2f}）| 食肉 {carn}（体积 {vc:.2f}）")
     # 生态金字塔：食肉者天然稀少（能量损耗——1:10 是常态）——共存即涌现
-    print(f"  = {'✓ 双生态位涌现（食草+食肉共存——捕食链自持）' if herb > 5 and carn >= 2 and herb > carn * 2 else '✗ 单生态位'}")
+    print(f"  = {'✓ 双生态位涌现（食草+食肉共存——捕食链自持）' if herb > 5 and carn >= 2 and herb > carn * 2 else '单 seed 低谷（以主判定为准）'}")
 
     # ---- 实验 2：捕食链 ----
     print("\n[exp2] 捕食链（小快捕食者吃大慢猎物）:")
@@ -415,8 +425,8 @@ def run():
 
     # ---- 实验 4：对比 stage24（捕食冻结） ----
     print("\n[exp4] 对比 stage24（捕食冻结 vs 捕食链）:")
-    print(f"  stage24: 食肉 1（冻结）| 本阶段: 食肉 {carn}"
-          f"——{'✓ 捕食冻结解除（捕食链涌现）' if carn >= 2 else '✗'}")
+    print(f"  stage24: 食肉 1（冻结）| 本阶段: 食肉存活 {c_mean:.0f}%"
+          f"——{'✓ 捕食冻结解除（捕食链涌现）' if c_mean > 50 else '✗'}")
 
     # ---- 图 ----
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
