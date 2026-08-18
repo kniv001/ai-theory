@@ -100,6 +100,9 @@ class LayerWorld:
         # 远视窄角（伏击捕食者——盯远处）/ 广角近视（防御觅食——看周围）
         self.vision_g = np.clip(1.0 + RNG.normal(0, 0.15, n0), 0.7, 1.3)
         self.fov_g = np.clip(1.0 + RNG.normal(0, 0.15, n0), 0.6, 1.5)
+        # 风险容忍基因：捕食目标价值 ×(0.5+risk)——高 risk 敢赌低成功率目标（收益高）/
+        # 低 risk 只追稳赢（成功率高）——捕食者内部策略分化（冒险家 vs 稳健派）
+        self.risk = np.clip(0.5 + RNG.normal(0, 0.15, n0), 0.1, 0.9)
         self.px = RNG.uniform(0, W, plants0)
         self.py = RNG.uniform(0, H, plants0)
         self.page = np.zeros(plants0)
@@ -255,8 +258,9 @@ class LayerWorld:
                             # 风险调整：价值 ×p_success（成功概率）——Δa 小者（杂食/业余）成功率
                             # 低——追猎价值低于采食——不追；Δa 大者（专业形态）p 高——价值高——追——
                             # 专业化由形态自然分化（无人工门槛——决策环的风险厌恶）
+                            # 风险容忍基因：(0.5+risk)——高 risk 敢赌低成功率目标——策略分化
                             targets.append((i, self.x[j], self.y[j],
-                                            net / d * urge_full[i] * (3.0 if locked else 1.0) * p_success,
+                                            net / d * urge_full[i] * (3.0 if locked else 1.0) * p_success * (0.5 + self.risk[i]),
                                             "prey", j, p_success))
                             # 捕食者记忆：看到猎物位置（猎物会动——仅弱记忆——价值低）
                             self.memory[i][(int(self.x[j]), int(self.y[j]))] = ["prey", 0]
@@ -396,10 +400,11 @@ class LayerWorld:
                 ac = np.clip(self.accel[i] * RNG.uniform(0.9, 1.1), 0.3, 2.5)   # 加速度基因变异
                 vg = np.clip(self.vision_g[i] * RNG.uniform(0.9, 1.1), 0.7, 1.3)   # 视野距离基因
                 fg = np.clip(self.fov_g[i] * RNG.uniform(0.9, 1.1), 0.6, 1.5)   # 视野角基因
+                nr = np.clip(self.risk[i] * RNG.uniform(0.9, 1.1), 0.1, 0.9)   # 风险容忍基因
                 new.append((self.x[i] + RNG.uniform(-3, 3), self.y[i] + RNG.uniform(-3, 3),
-                            v, max_speed(v, ac), 40.0, ap, am, ac, vg, fg, RNG.uniform(0, 2*np.pi)))
+                            v, max_speed(v, ac), 40.0, ap, am, ac, vg, fg, nr, RNG.uniform(0, 2*np.pi)))
                 self.satiety[i] -= 60.0
-        for nx, ny, nv, ns, nsat, nap, nam, nac, nvg, nfg, nh in new:
+        for nx, ny, nv, ns, nsat, nap, nam, nac, nvg, nfg, nrk, nh in new:
             self.x = np.append(self.x, np.clip(nx, 0, W))
             self.y = np.append(self.y, np.clip(ny, 0, H))
             self.mass = np.append(self.mass, nv)
@@ -407,6 +412,7 @@ class LayerWorld:
             self.accel = np.append(self.accel, nac)
             self.vision_g = np.append(self.vision_g, nvg)
             self.fov_g = np.append(self.fov_g, nfg)
+            self.risk = np.append(self.risk, nrk)
             self.heading = np.append(self.heading, nh)
             self.memory.append({})   # 新生物空记忆
             self.target_lock = np.append(self.target_lock, -1)
