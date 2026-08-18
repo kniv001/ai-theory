@@ -47,6 +47,8 @@ REPRO_TH = 120.0
 MAX_POP = 500
 VISION = 30.0   # 视野半径（感知范围——发现猎物/察觉威胁）
 OCCL_R = 2.0    # 遮挡半径（第三个对象与视线垂直距离 < 此值 = 挡住——生物/植物都遮挡）
+SOCIAL_R = 15.0   # 社会半径（同类在半径内 = 群成员——信息共享范围——文化环 R27）
+DIET_SIM = 0.35   # 食性相似度阈值（α_p/α_m 欧氏距离 < 此值 = 同类——社会认同边界）
 
 def tradeoff(mass):
     return np.clip(1.5 - 0.8 * mass, 0.1, 1.5)
@@ -216,6 +218,18 @@ class LayerWorld:
         # 遮挡对象数组（生物+植物——每步构建一次——草丛/体型挡视线）
         ox_all = np.concatenate([self.x[alive], self.px])
         oy_all = np.concatenate([self.y[alive], self.py])
+        # 社会层（文化环 R27）：同类近邻表（α 距离 < DIET_SIM 且空间距离 < SOCIAL_R——
+        # 同生态位 = 群成员——信息共享通道）
+        social = {}
+        if len(alive) > 1:
+            for idx, i in enumerate(alive):
+                d_ap = self.alpha_p[i] - self.alpha_p[alive]
+                d_am = self.alpha_m[i] - self.alpha_m[alive]
+                diet_d = np.hypot(d_ap, d_am)
+                space_d = np.hypot(self.x[i] - self.x[alive], self.y[i] - self.y[alive])
+                mates = alive[(diet_d < DIET_SIM) & (space_d < SOCIAL_R) & (space_d > 1e-6)]
+                if len(mates):
+                    social[i] = list(mates)
         targets = []
         # 扇形视野：只看到前方视野锥内且视线无遮挡的目标——看到即写入记忆
         for fx, fy in zip(self.px, self.py):
@@ -233,6 +247,10 @@ class LayerWorld:
                     targets.append((i, fx, fy, PLANT_REWARD / d * urge_full[i] * plant_conv(self.alpha_p[i]) * intake(self.mass[i]), "food"))
                     # 写入记忆（写回缓存——看到的位置记下来——转头后仍可寻）
                     self.memory[i][(int(fx), int(fy))] = ["food", 0]
+                    # 食物信号（社会层）：广播给近邻同类——同伴记忆写回（"那边有吃的"——
+                    # 文化环信息共享——群体觅食效率↑）
+                    for k in social.get(i, ()):
+                        self.memory[k][(int(fx), int(fy))] = ["food", 0]
         # 捕食目标（用户设计：冲刺预判——冲刺能覆盖距离才生成（避免失败冲刺亏空）+
         # 价值含净收益（回报 - 冲刺代价））
         for i in hungry:
@@ -329,6 +347,20 @@ class LayerWorld:
                 nd = np.hypot(dx, dy)
                 if nd > 1e-6:
                     flee[i] = (dx/nd, dy/nd)
+        # 警报传播（社会层）：flee 者的近邻同类也恐慌（即使没看到捕食者——
+        # 社会性警报——羊群效应——群体级威胁感知——捕食者突袭难度↑）
+        alarm = list(flee.keys())
+        for i in alarm:
+            if i not in social:
+                continue
+            for k in social[i]:
+                if k in flee:
+                    continue
+                dx = self.x[k] - self.x[i]
+                dy = self.y[k] - self.y[i]
+                nd = np.hypot(dx, dy)
+                if nd > 1e-6:
+                    flee[k] = (dx/nd, dy/nd)   # 恐慌方向 = 远离警报者
         best = {}
         for t in targets:
             if t[0] not in best or t[3] > best[t[0]][3]:
