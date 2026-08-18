@@ -19,15 +19,16 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# ============ 参数总览（精细化 R122）============
-# 环境：W×H=200² / 密度 120 只+300 株（pezzza 0.003/格²——相遇率决定捕食频率）
-# 植物：MATURE 10 / REPRO 0.12 / SPREAD 0.04 / MAX 300 / 外生保底 15%/步
-# 生物：mass 0.5±0.25 / accel 1.0±0.4 / α 0.6±0.2（食肉种子 5-10%）
-# 能量：植物 16×conv×intake / 肉类 3.0×mass×satiety×meat_conv（能量流守恒）
+# ============ 参数总览（精细化 R122 + 食性二维化）============
+# 环境：W×H=200² / 密度 120 只+240 株（pezzza 0.003/格²——植物稀缺驱动捕食）
+# 植物：MATURE 10 / REPRO 0.12 / SPREAD 0.04 / MAX 240 / 外生保底 15%/步
+# 生物：mass 0.5±0.25 / accel 1.0±0.4 / α_p 0.6±0.2 / α_m 0.35±0.2（独立种子）
+# 能量：植物 16×conv(α_p)×intake / 肉类 3.5×mass×satiety×meat_conv(α_m)（能量流守恒）
+# 全能税：α_p+α_m 超 1.2 付 0.3×超额/步（双高者重税——专业者免费——专业化压力）
 # 捕食：资格 accel×1.1 / 冲刺 max(Δa×4,3) / p=0.4+0.4min(1,Δa/2)-0.5体积差
 #       追速=speed+accel / 燃能 0.6/步 / 锁定×3 / 风险调整×p / 本帧判定
 # 记忆：TTL 60 / 新鲜度折扣 / 落空驱逐
-# 进化：小突变 ±10% / 大突变 3%±0.3 / 繁殖线 120 / 上限 120+60m
+# 进化：小突变 ±10% / 大突变 5%±0.3（两基因独立）/ 繁殖线 120 / 上限 120+60m
 RNG = np.random.default_rng(109)
 W, H = 200.0, 200.0   # 100→200（地图 4 倍——pezzza 空间缓冲思路——生态有空间分层）
 CONTACT = 2.0
@@ -40,7 +41,8 @@ MEM_TTL = 60     # 记忆遗忘时间（步——超时未刷新 = 遗忘）
 PLANT_MATURE = 10
 PLANT_REPRO = 0.12   # 0.08→0.12（植物产量支撑种群——否则被吃光灭绝）
 PLANT_SPREAD = 0.04
-MAX_PLANTS = 300   # 500→300（植物稀缺化——采食竞争出现——速度有价值——形态分化压力）
+MAX_PLANTS = 240   # 300→240（资源压力驱动捕食——二维化后杂食全能（α_p/α_m 双高）吃植物
+                   # 无忧 → 无捕食动机——植物稀缺 → 采食竞争 → 肉偏好者转向捕食——Lotka 生态学）
 REPRO_TH = 120.0
 MAX_POP = 500
 VISION = 30.0   # 视野半径（感知范围——发现猎物/察觉威胁）
@@ -56,14 +58,14 @@ def max_speed(mass, accel):
 def decay_rate(mass):
     return 0.4 + 0.35 * mass
 
-def plant_conv(alpha):
-    """植物转换度（α 高 = 食草倾向 = 植物全转换——α 低保底 0.15——饿不死但效率极低）"""
-    return 0.15 + 0.85 * alpha
+def plant_conv(alpha_p):
+    """植物转换度（植物偏好基因 α_p 高 = 植物全转换——低保底 0.15——饿不死但效率极低）"""
+    return 0.15 + 0.85 * alpha_p
 
-def meat_conv(alpha):
-    """肉类转换度（α 低 = 食肉倾向 = 肉类全转换——α 高保底 0.05——吃草者吃肉几乎无收益——
-    0.15→0.05：更极端专业化——否则 α>0.7 者吃肉仍净正——全体追猎）"""
-    return 0.03 + 0.85 * (1.0 - alpha)
+def meat_conv(alpha_m):
+    """肉类转换度（肉类偏好基因 α_m 高 = 肉类全转换——低保底 0.03——吃草者吃肉几乎无收益）
+    食性二维化：α_p/α_m 独立变异——杂食（双高）/专业（单高）/挑食（双低）都能涌现"""
+    return 0.03 + 0.85 * alpha_m
 
 def sat_max(mass):
     """storage（能量储备）：饱食度上限随质量——大动物耐饿（脂肪储备——现实：骆驼/熊）——
@@ -89,9 +91,10 @@ class LayerWorld:
         self.lock_age = np.zeros(n0)   # 锁定时长（超时解锁——追丢）
         self.satiety = np.full(n0, 60.0)
         self.alive = np.ones(n0, dtype=bool)
-        # α 初始 0.6±0.2（食肉种子少量——5-10%——否则初始食肉 22 只吃光猎物——
-        # 专业化应进化涌现而非预置大军——生态学捕食者/猎物 1:10+）
-        self.alpha = np.clip(0.6 + RNG.normal(0, 0.2, n0), 0.05, 0.95)
+        # 食性二维化：α_p（植物偏好）0.6±0.2 + α_m（肉类偏好）0.35±0.2 独立种子——
+        # 专业食草起点——食肉生态位由选择涌现（独立 + 全能税：全能者重税——专业者免费）
+        self.alpha_p = np.clip(0.6 + RNG.normal(0, 0.2, n0), 0.05, 0.95)
+        self.alpha_m = np.clip(0.35 + RNG.normal(0, 0.2, n0), 0.05, 0.95)
         self.px = RNG.uniform(0, W, plants0)
         self.py = RNG.uniform(0, H, plants0)
         self.page = np.zeros(plants0)
@@ -179,7 +182,7 @@ class LayerWorld:
                 ang = (ang + np.pi) % (2*np.pi) - np.pi   # 归一化 [-π, π]
                 if d < VISION and abs(ang) < FOV_HALF:   # 前方锥内才可见
                     # 摄入量随质量（大动物一口多——intake 维度）
-                    targets.append((i, fx, fy, PLANT_REWARD / d * urge_full[i] * plant_conv(self.alpha[i]) * intake(self.mass[i]), "food"))
+                    targets.append((i, fx, fy, PLANT_REWARD / d * urge_full[i] * plant_conv(self.alpha_p[i]) * intake(self.mass[i]), "food"))
                     # 写入记忆（写回缓存——看到的位置记下来——转头后仍可寻）
                     self.memory[i][(int(fx), int(fy))] = ["food", 0]
         # 捕食目标（用户设计：冲刺预判——冲刺能覆盖距离才生成（避免失败冲刺亏空）+
@@ -212,10 +215,11 @@ class LayerWorld:
                     # （d2 超出冲刺范围）——approach>0 曾误滤（accel 补偿在追逐中不存在））
                     if d < VISION and abs(ang) < FOV_HALF:
                         cost = 3.0 + (self.accel[i] - self.accel[j])   # 冲刺代价（研究：失败亏空但非致命）
-                        # 肉类能量 = 猎物体积×饱食度（身体+体内能量——能量包）× 转换度——预期净收益
-                        # 系数 3.0 + 风险调整（价值 ×p_success 挡业余者）：专业者回报 48/次
-                        # （1.6/步 > 消耗 0.8——可繁殖）——1.5 时期望只略高于采食——方差杀小种群
-                        net = p_success * 2.5 * self.mass[j] * self.satiety[j] * meat_conv(self.alpha[i]) \
+                        # 肉类能量 = 猎物体积×饱食度（身体+体内能量——能量包）× 肉类转换度——预期净收益
+                        # α_m 高者（肉偏好基因）net 大——捕食资格由 α_m 驱动（食性决策二维化）
+                        # 3.5：二维化后 meat_conv 天然更低（α_m 需爬高——回报补偿爬升代价——
+                        # 杂食者被全能税+风险调整挡——安全）
+                        net = p_success * 3.5 * self.mass[j] * self.satiety[j] * meat_conv(self.alpha_m[i]) \
                               - cost - 0.6 * d / max(self.speed[i] + self.accel[i], 0.5)
                         if net > 0:   # 预期净收益 > 0 才捕（多次尝试的期望——捕食 = 风险投资）
                             # 追猎锁定：持续追同一只（价值 ×3——否则每帧换目标——距离永不收敛）
@@ -238,7 +242,7 @@ class LayerWorld:
                     d = 1e-6
                 fresh = 1.0 - age / MEM_TTL   # 新鲜度 0-1（越新越可信）
                 if kind == "food":
-                    targets.append((i, qx, qy, PLANT_REWARD / d * urge_full[i] * self.alpha[i] * intake(self.mass[i]) * (0.3 + 0.7 * fresh),
+                    targets.append((i, qx, qy, PLANT_REWARD / d * urge_full[i] * plant_conv(self.alpha_p[i]) * intake(self.mass[i]) * (0.3 + 0.7 * fresh),
                                     "memfood"))
                 else:   # prey 记忆（弱——猎物已移动——只当方向提示）
                     targets.append((i, qx, qy, 0.2 * PLANT_REWARD / d * urge_full[i] * (0.3 + 0.7 * fresh),
@@ -299,7 +303,7 @@ class LayerWorld:
                 idx = int(np.argmin(ds))
                 if ds[idx] < CONTACT:
                     # 摄入随质量（intake）+ 上限随质量（storage——耐饿）
-                    self.satiety[i] = min(sat_max(self.mass[i]), self.satiety[i] + PLANT_REWARD * plant_conv(self.alpha[i]) * intake(self.mass[i]))
+                    self.satiety[i] = min(sat_max(self.mass[i]), self.satiety[i] + PLANT_REWARD * plant_conv(self.alpha_p[i]) * intake(self.mass[i]))
                     if kind == "memfood":
                         self.memory[i][(int(tx), int(ty))] = ["food", 0]   # 记忆命中——刷新（写回）
                     self.px = np.delete(self.px, idx)
@@ -319,9 +323,8 @@ class LayerWorld:
                 if self.alive[j] and d < d_charge:   # 本帧开始时已在冲刺范围内才掷骰子
                     self.satiety[i] -= charge_cost   # 冲刺消耗（无论成败）
                     if RNG.random() < p_success:   # 概率性成功（Wilson：捕食成功率低）
-                        # 肉类能量 = 猎物体积×饱食度（身体+体内能量）× 转换度（能量流守恒——
-                        # 大而饱的猎物 = 大餐——小饿猎物 = 零食）——上限随质量（storage）
-                        self.satiety[i] = min(sat_max(self.mass[i]), self.satiety[i] + 3.0 * self.mass[j] * self.satiety[j] * meat_conv(self.alpha[i]))
+                        # 肉类能量 = 猎物体积×饱食度（身体+体内能量）× 肉类转换度（α_m——能量流守恒）
+                        self.satiety[i] = min(sat_max(self.mass[i]), self.satiety[i] + 3.5 * self.mass[j] * self.satiety[j] * meat_conv(self.alpha_m[i]))
                         self.alive[j] = False
                         self.target_lock[i] = -1   # 捕食成功——解锁
                         self.lock_age[i] = 0
@@ -339,24 +342,31 @@ class LayerWorld:
             if i not in moved:
                 self.heading[i] += 0.785   # 45°/步（8 步扫一圈）
         # 消耗 = 体积 + 加速度成本（a 高 = 冲刺肌肉 = 高代谢——Wilson 2018：捕食者维持成本高）
-        self.satiety[alive] -= decay_rate(self.mass[alive]) + self.accel[alive] * 0.15
+        #        + 全能代价（α_p+α_m 合计超 1.2 = 两套消化系统 = 更高维持成本——
+        #        单一偏好（无论哪边）免费——双高者重税——否则 α_m 中性漂移——捕食专业化无压力）
+        omnivory_cost = 0.3 * np.clip(self.alpha_p[alive] + self.alpha_m[alive] - 1.2, 0, 0.8)
+        self.satiety[alive] -= decay_rate(self.mass[alive]) + self.accel[alive] * 0.15 + omnivory_cost
         self.alive[np.where(self.satiety <= 0)[0]] = False
         alive = np.where(self.alive)[0]
         new = []
         for i in alive:
             if self.satiety[i] > REPRO_TH and len(alive) + len(new) < MAX_POP:
                 v = np.clip(self.mass[i] * RNG.uniform(0.9, 1.1), 0.3, 1.7)
-                # 偶发大突变（3% ±0.3 跳跃——宏突变/基因重组——低 α 种子重注入——
-                # 否则捕食者灭绝后 α 漂不回——生态位不可恢复——真实进化靠突变保持多样性）
-                if RNG.random() < 0.03:
-                    a = np.clip(self.alpha[i] + RNG.uniform(-0.3, 0.3), 0.05, 0.95)
+                # 偶发大突变（3% ±0.3 跳跃——宏突变/基因重组——低偏好种子重注入——
+                # 否则捕食者灭绝后漂不回——生态位不可恢复）——两基因各自独立突变
+                if RNG.random() < 0.05:
+                    ap = np.clip(self.alpha_p[i] + RNG.uniform(-0.3, 0.3), 0.05, 0.95)
                 else:
-                    a = np.clip(self.alpha[i] * RNG.uniform(0.9, 1.1), 0.05, 0.95)
+                    ap = np.clip(self.alpha_p[i] * RNG.uniform(0.9, 1.1), 0.05, 0.95)
+                if RNG.random() < 0.05:
+                    am = np.clip(self.alpha_m[i] + RNG.uniform(-0.3, 0.3), 0.05, 0.95)
+                else:
+                    am = np.clip(self.alpha_m[i] * RNG.uniform(0.9, 1.1), 0.05, 0.95)
                 ac = np.clip(self.accel[i] * RNG.uniform(0.9, 1.1), 0.3, 2.5)   # 加速度基因变异
                 new.append((self.x[i] + RNG.uniform(-3, 3), self.y[i] + RNG.uniform(-3, 3),
-                            v, max_speed(v, ac), 40.0, a, ac, RNG.uniform(0, 2*np.pi)))
+                            v, max_speed(v, ac), 40.0, ap, am, ac, RNG.uniform(0, 2*np.pi)))
                 self.satiety[i] -= 60.0
-        for nx, ny, nv, ns, nsat, na, nac, nh in new:
+        for nx, ny, nv, ns, nsat, nap, nam, nac, nh in new:
             self.x = np.append(self.x, np.clip(nx, 0, W))
             self.y = np.append(self.y, np.clip(ny, 0, H))
             self.mass = np.append(self.mass, nv)
@@ -367,14 +377,16 @@ class LayerWorld:
             self.target_lock = np.append(self.target_lock, -1)
             self.lock_age = np.append(self.lock_age, 0)
             self.satiety = np.append(self.satiety, nsat)
-            self.alpha = np.append(self.alpha, na)
+            self.alpha_p = np.append(self.alpha_p, nap)
+            self.alpha_m = np.append(self.alpha_m, nam)
             self.alive = np.append(self.alive, True)
         self.plant_grow()
         a = np.where(self.alive)[0]
-        herb = np.sum(self.alpha[a] > 0.7) if len(a) else 0
-        carn = np.sum(self.alpha[a] < 0.3) if len(a) else 0
-        vol_herb = np.mean(self.mass[a][self.alpha[a] > 0.7]) if herb else 0
-        vol_carn = np.mean(self.mass[a][self.alpha[a] < 0.3]) if carn else 0
+        # 生态位判定（二维——主导偏好）：食草 = α_p 比 α_m 高 0.2；食肉 = α_m 比 α_p 高 0.2
+        herb = np.sum(self.alpha_p[a] > self.alpha_m[a] + 0.2) if len(a) else 0
+        carn = np.sum(self.alpha_m[a] > self.alpha_p[a] + 0.2) if len(a) else 0
+        vol_herb = np.mean(self.mass[a][self.alpha_p[a] > self.alpha_m[a] + 0.2]) if herb else 0
+        vol_carn = np.mean(self.mass[a][self.alpha_m[a] > self.alpha_p[a] + 0.2]) if carn else 0
         self.history.append((np.sum(self.alive), len(self.px), herb, carn, vol_herb, vol_carn))
 
     def run(self, T):
@@ -417,10 +429,10 @@ def run():
     else:
         print(f"  生态位未涌现（需检查参数）")
 
-    # ---- 实验 3：α-体积共演化 ----
+    # ---- 实验 3：偏好-体积共演化 ----
     a = np.where(w.alive)[0]
-    corr = np.corrcoef(w.alpha[a], w.mass[a])[0, 1] if len(a) > 2 else 0
-    print(f"\n[exp3] α-体积相关: {corr:+.2f}"
+    corr = np.corrcoef(w.alpha_m[a], w.mass[a])[0, 1] if len(a) > 2 else 0
+    print(f"\n[exp3] 肉偏好-体积相关: {corr:+.2f}"
           f"（{'✓ 负相关——小体积食肉/大体积食草——生态位-体型绑定' if corr < -0.3 else '关联弱'}）")
 
     # ---- 实验 4：对比 stage24（捕食冻结） ----
@@ -430,12 +442,14 @@ def run():
 
     # ---- 图 ----
     fig, axes = plt.subplots(1, 3, figsize=(13, 4))
-    axes[0].hist(w.alpha[a], bins=15, alpha=0.7, label="alpha")
-    axes[0].set_title("Exp1: alpha distribution (both niches)")
-    axes[0].set_xlabel("alpha")
-    axes[1].scatter(w.mass[a], w.alpha[a], s=15)
-    axes[1].set_title("Exp3: mass-alpha (niche-body binding)")
-    axes[1].set_xlabel("mass"); axes[1].set_ylabel("alpha")
+    # 二维食性空间（α_p × α_m——四象限：专业食草/专业食肉/杂食/挑食）
+    axes[0].scatter(w.alpha_p[a], w.alpha_m[a], s=15, alpha=0.7)
+    axes[0].axhline(0.5, color="gray", lw=0.5); axes[0].axvline(0.5, color="gray", lw=0.5)
+    axes[0].set_title("Exp1: 2D diet space (alpha_p x alpha_m)")
+    axes[0].set_xlabel("alpha_p (plant)"); axes[0].set_ylabel("alpha_m (meat)")
+    axes[1].scatter(w.mass[a], w.alpha_m[a], s=15)
+    axes[1].set_title("Exp3: mass-α_m (niche-body binding)")
+    axes[1].set_xlabel("mass"); axes[1].set_ylabel("α_m")
     axes[2].plot(h[:, 0], label="total")
     axes[2].plot(h[:, 2], label="herb")
     axes[2].plot(h[:, 3], "--", label="carn")
