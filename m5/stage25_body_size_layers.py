@@ -46,6 +46,7 @@ MAX_PLANTS = 240   # 300→240（资源压力驱动捕食——二维化后杂�
 REPRO_TH = 120.0
 MAX_POP = 500
 VISION = 30.0   # 视野半径（感知范围——发现猎物/察觉威胁）
+OCCL_R = 2.0    # 遮挡半径（第三个对象与视线垂直距离 < 此值 = 挡住——生物/植物都遮挡）
 
 def tradeoff(mass):
     return np.clip(1.5 - 0.8 * mass, 0.1, 1.5)
@@ -95,10 +96,30 @@ class LayerWorld:
         # 专业食草起点——食肉生态位由选择涌现（独立 + 全能税：全能者重税——专业者免费）
         self.alpha_p = np.clip(0.6 + RNG.normal(0, 0.2, n0), 0.05, 0.95)
         self.alpha_m = np.clip(0.35 + RNG.normal(0, 0.2, n0), 0.05, 0.95)
+        # 感知二维化：视野距离基因（×30）与视野角基因（×120°）独立变异——
+        # 远视窄角（伏击捕食者——盯远处）/ 广角近视（防御觅食——看周围）
+        self.vision_g = np.clip(1.0 + RNG.normal(0, 0.15, n0), 0.7, 1.3)
+        self.fov_g = np.clip(1.0 + RNG.normal(0, 0.15, n0), 0.6, 1.5)
         self.px = RNG.uniform(0, W, plants0)
         self.py = RNG.uniform(0, H, plants0)
         self.page = np.zeros(plants0)
         self.history = []
+
+    def line_occluded(self, ax, ay, bx, by, alive_idx, ox, oy):
+        """视线遮挡：对象（生物+植物）位于 a→b 连线附近（垂直距离 < OCCL_R 且投影在
+        线段内）= 挡住视线——生物/植物都能遮挡（草丛/体型挡视线——伏击通道）"""
+        vx, vy = bx - ax, by - ay
+        L2 = vx * vx + vy * vy
+        if L2 < 1e-9:
+            return False
+        t = ((ox - ax) * vx + (oy - ay) * vy) / L2
+        inside = (t > 0.08) & (t < 0.92)   # 投影在线段中部（端点即观察者/目标本身——排除）
+        if not np.any(inside):
+            return False
+        px_ = ax + t * vx
+        py_ = ay + t * vy
+        dist = np.hypot(ox - px_, oy - py_)
+        return np.any(inside & (dist < OCCL_R))
 
     def move_with_dynamics(self, i, dx, dy, chase=False):
         """移动（瞬时——效率——速度上限 vmax）：
@@ -170,8 +191,11 @@ class LayerWorld:
                     (self.lock_age[i] > 40 or not self.alive[self.target_lock[i]]):
                 self.target_lock[i] = -1
                 self.lock_age[i] = 0
+        # 遮挡对象数组（生物+植物——每步构建一次——草丛/体型挡视线）
+        ox_all = np.concatenate([self.x[alive], self.px])
+        oy_all = np.concatenate([self.y[alive], self.py])
         targets = []
-        # 扇形视野：只看到前方视野锥内的目标（发现——捕食第一环节）——看到即写入记忆
+        # 扇形视野：只看到前方视野锥内且视线无遮挡的目标——看到即写入记忆
         for fx, fy in zip(self.px, self.py):
             for i in hungry:
                 dx, dy = fx - self.x[i], fy - self.y[i]
@@ -180,7 +204,9 @@ class LayerWorld:
                     d = 1e-6
                 ang = np.arctan2(dy, dx) - self.heading[i]   # 目标在朝向的哪个方向
                 ang = (ang + np.pi) % (2*np.pi) - np.pi   # 归一化 [-π, π]
-                if d < VISION and abs(ang) < FOV_HALF:   # 前方锥内才可见
+                if d < VISION * self.vision_g[i] and abs(ang) < FOV_HALF * self.fov_g[i]:   # 前方锥内才可见（感知基因）
+                    if self.line_occluded(self.x[i], self.y[i], fx, fy, alive, ox_all, oy_all):
+                        continue   # 被挡（草丛/体型）——不可见——不写记忆
                     # 摄入量随质量（大动物一口多——intake 维度）
                     targets.append((i, fx, fy, PLANT_REWARD / d * urge_full[i] * plant_conv(self.alpha_p[i]) * intake(self.mass[i]), "food"))
                     # 写入记忆（写回缓存——看到的位置记下来——转头后仍可寻）
@@ -213,7 +239,9 @@ class LayerWorld:
                     # 扇形视野内即可追——不要求速度优势（Wilson：捕食 = 突袭——接近靠隐蔽
                     # 不靠速度——追逐速度优势是猎物"逃脱"的武器——追不上的自动追丢
                     # （d2 超出冲刺范围）——approach>0 曾误滤（accel 补偿在追逐中不存在））
-                    if d < VISION and abs(ang) < FOV_HALF:
+                    if d < VISION * self.vision_g[i] and abs(ang) < FOV_HALF * self.fov_g[i]:
+                        if self.line_occluded(self.x[i], self.y[i], self.x[j], self.y[j], alive, ox_all, oy_all):
+                            continue   # 猎物被草丛/体型挡住——看不见——捕食失败（可伏击的前提）
                         cost = 3.0 + (self.accel[i] - self.accel[j])   # 冲刺代价（研究：失败亏空但非致命）
                         # 肉类能量 = 猎物体积×饱食度（身体+体内能量——能量包）× 肉类转换度——预期净收益
                         # α_m 高者（肉偏好基因）net 大——捕食资格由 α_m 驱动（食性决策二维化）
@@ -265,7 +293,10 @@ class LayerWorld:
                     ang = np.arctan2(self.y[j] - self.y[i], self.x[j] - self.x[i]) - self.heading[i]
                     ang = (ang + np.pi) % (2*np.pi) - np.pi
                     d_charge_j = max((self.accel[j] - self.accel[i]) * 4.0, 3.0)
-                    if d < d_charge_j and abs(ang) < FOV_HALF:   # 冲刺覆盖内 + 视野内 = 危险
+                    # 威胁可见性：扇形内 + 视线无遮挡（捕食者藏植物后 = 看不见 = 突袭窗口——
+                    # 遮挡让伏击成为真实通道）
+                    if d < d_charge_j and abs(ang) < FOV_HALF * self.fov_g[i] \
+                            and not self.line_occluded(self.x[i], self.y[i], self.x[j], self.y[j], alive, ox_all, oy_all):
                         threats.append((j, d))
             if threats:
                 # 最近威胁 → 朝反方向跑
@@ -363,15 +394,19 @@ class LayerWorld:
                 else:
                     am = np.clip(self.alpha_m[i] * RNG.uniform(0.9, 1.1), 0.05, 0.95)
                 ac = np.clip(self.accel[i] * RNG.uniform(0.9, 1.1), 0.3, 2.5)   # 加速度基因变异
+                vg = np.clip(self.vision_g[i] * RNG.uniform(0.9, 1.1), 0.7, 1.3)   # 视野距离基因
+                fg = np.clip(self.fov_g[i] * RNG.uniform(0.9, 1.1), 0.6, 1.5)   # 视野角基因
                 new.append((self.x[i] + RNG.uniform(-3, 3), self.y[i] + RNG.uniform(-3, 3),
-                            v, max_speed(v, ac), 40.0, ap, am, ac, RNG.uniform(0, 2*np.pi)))
+                            v, max_speed(v, ac), 40.0, ap, am, ac, vg, fg, RNG.uniform(0, 2*np.pi)))
                 self.satiety[i] -= 60.0
-        for nx, ny, nv, ns, nsat, nap, nam, nac, nh in new:
+        for nx, ny, nv, ns, nsat, nap, nam, nac, nvg, nfg, nh in new:
             self.x = np.append(self.x, np.clip(nx, 0, W))
             self.y = np.append(self.y, np.clip(ny, 0, H))
             self.mass = np.append(self.mass, nv)
             self.speed = np.append(self.speed, ns)
             self.accel = np.append(self.accel, nac)
+            self.vision_g = np.append(self.vision_g, nvg)
+            self.fov_g = np.append(self.fov_g, nfg)
             self.heading = np.append(self.heading, nh)
             self.memory.append({})   # 新生物空记忆
             self.target_lock = np.append(self.target_lock, -1)
