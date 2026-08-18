@@ -56,6 +56,14 @@ def max_speed(mass, accel):
     猫科 vs 羚羊——Wilson 2015：质量增强速度削弱——形态分化靠此涌现）"""
     return tradeoff(mass) * np.clip(1.35 - 0.22 * accel, 0.7, 1.35)
 
+def cruise_speed(mass, cruise_g):
+    """巡航速度（日常觅食/迁移——低能耗低速——不靠爆发）——与 accel 无关（慢走不用爆发）"""
+    return tradeoff(mass) * (0.8 + 0.3 * cruise_g)
+
+def sprint_speed(mass, accel, sprint_g):
+    """极速（逃跑/追猎爆发——高能耗）——继续受 accel trade-off 惩罚（加速快极速低）"""
+    return max_speed(mass, accel) * sprint_g
+
 def decay_rate(mass):
     return 0.4 + 0.35 * mass
 
@@ -85,7 +93,12 @@ class LayerWorld:
         self.mass = np.clip(0.5 + RNG.normal(0, 0.25, n0), 0.3, 1.7)   # 质量（体型——速度/代谢/防御/能量包）
         # 加速度 = 进化基因（0.3-2.5——与极速 trade-off：加速快 = 极速低）
         self.accel = np.clip(1.0 + RNG.normal(0, 0.4, n0), 0.3, 2.5)
-        self.speed = max_speed(self.mass, self.accel)
+        # 巡航/极速拆分：日常移动（低能耗）与爆发（追猎/逃跑）独立进化
+        self.cruise_g = np.clip(1.0 + RNG.normal(0, 0.15, n0), 0.7, 1.3)
+        # sprint_g 下限 0.85（0.7 时捕食者 accel 高→max_speed 已低→×0.7 雪上加霜——追不上）
+        self.sprint_g = np.clip(1.0 + RNG.normal(0, 0.15, n0), 0.85, 1.3)
+        self.cruise = cruise_speed(self.mass, self.cruise_g)
+        self.sprint = sprint_speed(self.mass, self.accel, self.sprint_g)
         self.heading = RNG.uniform(0, 2*np.pi, n0)   # 朝向（扇形视野方向）
         self.memory = [{} for _ in range(n0)]   # 空间记忆：{(qx,qy): [kind, age]}——视野的缓存
         self.target_lock = np.full(n0, -1, dtype=int)   # 追猎锁定（猎物索引——持续追一只）
@@ -124,12 +137,18 @@ class LayerWorld:
         dist = np.hypot(ox - px_, oy - py_)
         return np.any(inside & (dist < OCCL_R))
 
-    def move_with_dynamics(self, i, dx, dy, chase=False):
-        """移动（瞬时——效率——速度上限 vmax）：
-        追逐模式（捕食者追猎物）：追速 = 极速 + 加速度加成——
-        Wilson 2013：短程追逐速度由加速度决胜（猎豹爆发）——没有它捕食者与猎物
-        同速——猎物 flee 后永远追不回——冲刺永远无法发动"""
-        vmax = self.speed[i] + (1.0 * self.accel[i] if chase else 0.0)   # 追猎 = 持续爆发（短程）
+    def move_with_dynamics(self, i, dx, dy, mode="cruise"):
+        """移动（瞬时——速度上限按模式）：
+        cruise：日常觅食（巡航速度——低能耗）
+        sprint：逃跑/紧急（极速——爆发——flee 燃能）
+        chase：追猎（极速 + 加速度加成——Wilson 2013：短程追逐由加速度决胜——
+        没有它捕食者与猎物同速——flee 后追不回——冲刺永远无法发动）"""
+        if mode == "chase":
+            vmax = self.sprint[i] + self.accel[i]
+        elif mode == "sprint":
+            vmax = self.sprint[i]
+        else:
+            vmax = self.cruise[i]
         self.x[i] = np.clip(self.x[i] + dx * vmax, 0, W)
         self.y[i] = np.clip(self.y[i] + dy * vmax, 0, H)
 
@@ -251,7 +270,7 @@ class LayerWorld:
                         # 3.5：二维化后 meat_conv 天然更低（α_m 需爬高——回报补偿爬升代价——
                         # 杂食者被全能税+风险调整挡——安全）
                         net = p_success * 3.5 * self.mass[j] * self.satiety[j] * meat_conv(self.alpha_m[i]) \
-                              - cost - 0.6 * d / max(self.speed[i] + self.accel[i], 0.5)
+                              - cost - 0.6 * d / max(self.sprint[i] + self.accel[i], 0.5)
                         if net > 0:   # 预期净收益 > 0 才捕（多次尝试的期望——捕食 = 风险投资）
                             # 追猎锁定：持续追同一只（价值 ×3——否则每帧换目标——距离永不收敛）
                             locked = self.target_lock[i] == j
@@ -316,17 +335,17 @@ class LayerWorld:
                 best[t[0]] = t
         moved = set()
         for i, (i0, tx, ty, val, kind, *rest) in best.items():
-            # 逃跑优先（威胁存在 → 逃跑而非觅食）
+            # 逃跑优先（威胁存在 → 逃跑而非觅食——极速爆发——逃跑也耗能）
             if i in flee:
                 fx, fy = flee[i]
-                self.move_with_dynamics(i, fx, fy)
+                self.move_with_dynamics(i, fx, fy, mode="sprint")
                 self.heading[i] = np.arctan2(fy, fx)   # 朝向 = 移动方向
                 moved.add(i)
                 continue
             dx, dy = tx - self.x[i], ty - self.y[i]
             d = np.hypot(dx, dy)
             if d > 1e-6:
-                self.move_with_dynamics(i, dx/d, dy/d, chase=(kind == "prey"))
+                self.move_with_dynamics(i, dx/d, dy/d, mode=("chase" if kind == "prey" else "cruise"))
                 if kind == "prey":
                     self.satiety[i] -= 0.5   # 追逐燃能（Wilson 2018：追逐 = 肌肉燃烧——
                     # 失败追逐的机会成本——杂食者追猎转亏——只有专业食肉者承担得起）
@@ -401,18 +420,28 @@ class LayerWorld:
                 vg = np.clip(self.vision_g[i] * RNG.uniform(0.9, 1.1), 0.7, 1.3)   # 视野距离基因
                 fg = np.clip(self.fov_g[i] * RNG.uniform(0.9, 1.1), 0.6, 1.5)   # 视野角基因
                 nr = np.clip(self.risk[i] * RNG.uniform(0.9, 1.1), 0.1, 0.9)   # 风险容忍基因
+                cg = np.clip(self.cruise_g[i] * RNG.uniform(0.9, 1.1), 0.7, 1.3)   # 巡航基因
+                # 极速基因大突变（±0.3——高极速种子更快涌现——捕食链恢复快）
+                if RNG.random() < 0.05:
+                    sg = np.clip(self.sprint_g[i] + RNG.uniform(-0.3, 0.3), 0.85, 1.3)
+                else:
+                    sg = np.clip(self.sprint_g[i] * RNG.uniform(0.9, 1.1), 0.85, 1.3)
                 new.append((self.x[i] + RNG.uniform(-3, 3), self.y[i] + RNG.uniform(-3, 3),
-                            v, max_speed(v, ac), 40.0, ap, am, ac, vg, fg, nr, RNG.uniform(0, 2*np.pi)))
+                            v, cruise_speed(v, cg), sprint_speed(v, ac, sg), 40.0, ap, am, ac,
+                            vg, fg, nr, cg, sg, RNG.uniform(0, 2*np.pi)))
                 self.satiety[i] -= 60.0
-        for nx, ny, nv, ns, nsat, nap, nam, nac, nvg, nfg, nrk, nh in new:
+        for nx, ny, nv, ncru, nspr, nsat, nap, nam, nac, nvg, nfg, nrk, ncg, nsg, nh in new:
             self.x = np.append(self.x, np.clip(nx, 0, W))
             self.y = np.append(self.y, np.clip(ny, 0, H))
             self.mass = np.append(self.mass, nv)
-            self.speed = np.append(self.speed, ns)
+            self.cruise = np.append(self.cruise, ncru)
+            self.sprint = np.append(self.sprint, nspr)
             self.accel = np.append(self.accel, nac)
             self.vision_g = np.append(self.vision_g, nvg)
             self.fov_g = np.append(self.fov_g, nfg)
             self.risk = np.append(self.risk, nrk)
+            self.cruise_g = np.append(self.cruise_g, ncg)
+            self.sprint_g = np.append(self.sprint_g, nsg)
             self.heading = np.append(self.heading, nh)
             self.memory.append({})   # 新生物空记忆
             self.target_lock = np.append(self.target_lock, -1)
