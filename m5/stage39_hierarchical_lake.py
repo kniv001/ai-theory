@@ -40,7 +40,7 @@ LAMBDA_L = 0.02       # 湖级侵蚀
 L_CAP = 1.0           # 湖级容量预算
 
 
-def load_corpus(path, n=N_TRAIN, lo=3, hi=60, preserve_order=False):
+def load_corpus(path, n=N_TRAIN, lo=2, hi=60, preserve_order=False):   # lo=2（词块 2 字词 + 简单句）
     """加载语料——过滤（长度/ASCII 噪声）——抽样 n 句（preserve_order：保留原序——话题相邻结构）"""
     with open(path, encoding="utf-8") as f:
         sents = [l.strip() for l in f if l.strip()]
@@ -213,8 +213,8 @@ class TopicLayer:
 def run():
     print("=== M5 阶段 39：层级湖（文字湖桥梁 ③——R16 尺度递归——两阶段渐进加难） ===\n")
     base = os.path.dirname(__file__)
-    sents_a = load_corpus(os.path.join(base, "corpus_simple_natural.txt"), 302)
-    print(f"阶段 A 语料：{len(sents_a)} 句（自然简单主谓宾）")
+    sents_a = load_corpus(os.path.join(base, "corpus_simple_natural.txt"), 736)
+    print(f"阶段 A 语料：{len(sents_a)} 行（词块 + 自然简单主谓宾——词→句渐进）")
     from collections import Counter
     freq = Counter("".join(sents_a))
     chars = [c for c, _ in freq.most_common(N_CHAR)]
