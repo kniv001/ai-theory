@@ -40,15 +40,18 @@ LAMBDA_L = 0.02       # 湖级侵蚀
 L_CAP = 1.0           # 湖级容量预算
 
 
-def load_corpus(path, n=N_TRAIN, lo=3, hi=60):   # lo=3（简单主谓宾句 3-8 字——"我吃饭"——不能被 8 过滤）
-    """加载 wiki 抽样语料——过滤（长度/ASCII 噪声）——抽样 n 句"""
+def load_corpus(path, n=N_TRAIN, lo=3, hi=60, preserve_order=False):
+    """加载语料——过滤（长度/ASCII 噪声）——抽样 n 句（preserve_order：保留原序——话题相邻结构）"""
     with open(path, encoding="utf-8") as f:
         sents = [l.strip() for l in f if l.strip()]
     clean = [s for s in sents if lo <= len(s) <= hi and not re.search(r"[A-Za-z0-9一-鿿]", s) is None]
     clean = [s for s in clean if re.search(r"[一-鿿]", s)]
-    rng = np.random.default_rng(7)
     if len(clean) > n:
-        clean = rng.choice(clean, n, replace=False).tolist()
+        if preserve_order:
+            clean = clean[:n]                     # 顺序保留（窗口共现/话题结构）
+        else:
+            rng = np.random.default_rng(7)
+            clean = rng.choice(clean, n, replace=False).tolist()
     return clean
 
 
@@ -87,22 +90,36 @@ class CharLake:
         for _ in range(3):
             self.step(np.zeros(len(self.chars), dtype=complex))
 
+    def inject_sentence(self, sent):
+        """整句同时注入（加速——字的共振相互独立——幅度 = 逐字串行等价）"""
+        drive = np.zeros(len(self.chars), dtype=complex)
+        for c in sent:
+            if c in self.ci:
+                i = self.ci[c]
+                drive[i] += AMP_IN * np.exp(1j * (self.omega[i] * self.t))
+        for _ in range(PULSE_STEPS):
+            self.step(drive)
+        for _ in range(3):
+            self.step(np.zeros(len(self.chars), dtype=complex))
+        return np.abs(self.z)
+
     def learn_epoch(self, sents):
         n = len(self.chars)
         for sent in sents:
-            seq = [c for c in sent if c in self.ci]
-            self.act = np.zeros(n)
-            for c in seq:
-                self.inject(c)
-                self.act += np.abs(self.z)
-                self.act *= 0.9
-            for i in range(len(seq)):
-                wi = self.ci[seq[i]]
-                for j in range(i + 1, len(seq)):
-                    wj = self.ci[seq[j]]
-                    pair = EPS_K * self.act[wi] * self.act[wj] / (j - i)
-                    self.K[wi, wj] += pair
-                    self.K[wj, wi] += pair
+            seq_idx = [self.ci[c] for c in sent if c in self.ci]
+            if not seq_idx:
+                continue
+            amp = self.inject_sentence(sent)
+            L = len(seq_idx)
+            sub = np.array(seq_idx)
+            A = amp[sub]
+            # 句内全对沉积（矩阵化——距离衰减——一次 numpy）
+            idx = np.arange(L)
+            dist_w = 1.0 / np.maximum(np.abs(idx[:, None] - idx[None, :]), 1.0)
+            contrib = EPS_K * np.outer(A, A) * np.triu(dist_w, 1)
+            pi, pj = np.nonzero(contrib)
+            self.K[sub[pi], sub[pj]] += contrib[pi, pj]
+            self.K[sub[pj], sub[pi]] += contrib[pi, pj]
             for _ in range(4):
                 self.step(np.zeros(n, dtype=complex))
         self.K *= (1.0 - LAMBDA_K)
@@ -110,13 +127,10 @@ class CharLake:
         over = row_sum > K_CAP
         self.K[over] *= (K_CAP / row_sum[over])[:, None]
         self.K[:, over] *= (K_CAP / row_sum[over])[None, :]
-        for i in range(n):
-            for j in range(i + 1, n):
-                kij = self.K[i, j]
-                if kij > 0.08:
-                    pull = ETA_OMEGA * (self.omega[j] - self.omega[i]) * kij
-                    self.omega[i] += pull
-                    self.omega[j] -= pull
+        # 频率吸引（矩阵化——掩码强耦合——每字净吸引）
+        mask = (self.K > 0.08)
+        dw = ETA_OMEGA * (self.omega[None, :] - self.omega[:, None]) * np.where(mask, self.K, 0.0)
+        self.omega += dw.sum(axis=1)
         self.omega = np.clip(self.omega, OMEGA_LO, OMEGA_HI)
 
     def clusters(self, th=0.08):
@@ -138,15 +152,11 @@ class CharLake:
         return list(comps.values())
 
     def sentence_sig(self, sent):
-        """句子的湖级签名：注入句子 → 每湖总幅度"""
-        self.act = np.zeros(len(self.chars))
-        for c in sent:
-            if c in self.ci:
-                self.inject(c)
-                self.act += np.abs(self.z)
+        """句子的湖级签名：整句同时注入 → 每湖总幅度"""
+        amp = self.inject_sentence(sent)
         if self.lake_members is None:
-            return np.array([self.act.sum()])
-        return np.array([self.act[m].sum() for m in self.lake_members])
+            return np.array([amp.sum()])
+        return np.array([amp[m].sum() for m in self.lake_members])
 
     def coherence(self, members):
         ph = np.angle(self.z[members])
@@ -201,44 +211,68 @@ class TopicLayer:
 
 
 def run():
-    print("=== M5 阶段 39：层级湖（文字湖桥梁 ③——R16 尺度递归——字→词→句→篇章） ===\n")
-    path = os.path.join(os.path.dirname(__file__), "corpus_simple_natural.txt")
-    sents = load_corpus(path, N_TRAIN)
-    print(f"语料：{len(sents)} 句（阶段 A——自然简单主谓宾——先简单后混合——用户原则）")
-    # 字集：高频字（前 N_CHAR）
+    print("=== M5 阶段 39：层级湖（文字湖桥梁 ③——R16 尺度递归——两阶段渐进加难） ===\n")
+    base = os.path.dirname(__file__)
+    sents_a = load_corpus(os.path.join(base, "corpus_simple_natural.txt"), 302)
+    print(f"阶段 A 语料：{len(sents_a)} 句（自然简单主谓宾）")
     from collections import Counter
-    freq = Counter("".join(sents))
+    freq = Counter("".join(sents_a))
     chars = [c for c, _ in freq.most_common(N_CHAR)]
-    print(f"字集：{len(chars)} 高频字")
-    # ---- exp1：字湖涌现（真实语料） ----
+    print(f"字集：{len(chars)} 高频字（阶段 A 字频——B 阶段扩展）")
     w = CharLake(chars)
+    # ---- 阶段 A：简单语料（基础结构） ----
     for ep in range(25):
-        w.learn_epoch(sents)
+        w.learn_epoch(sents_a)
     clusters = w.clusters()
     big = [c for c in clusters if len(c) >= 2]
-    print(f"[exp1] 字湖模块 = {len(big)}（≥2 字）——top5:")
+    print(f"[阶段A] 字湖模块 = {len(big)}——top5:")
     for ci, members in enumerate(big[:5]):
         print(f"      湖{ci}: [{''.join(chars[i] for i in members)}] 相干={w.coherence(members):.2f}")
     w.lake_members = [c for c in big if len(c) >= 2]
-    # ---- exp2/3：话题湖（高层——湖级签名共现） ----
     topic = TopicLayer(len(w.lake_members))
     for ep in range(25):
-        for s in sents:
+        for s in sents_a:
             sig = w.sentence_sig(s)
-            norm = np.maximum(sig.sum(), 1e-9)
-            topic.learn(sig / norm)
+            topic.learn(sig / np.maximum(sig.sum(), 1e-9))
         topic.epoch_end()
-    topics = topic.topics()
-    tbig = [t for t in topics if len(t) >= 2]
-    print(f"[exp3] 话题湖（L 模块≥2）= {len(tbig)}——湖组合:")
+    tbig = [t for t in topic.topics() if len(t) >= 2]
+    print(f"[阶段A] 话题湖 = {len(tbig)}")
+    # ---- 阶段 B：混合语料（加难——简单保留 + 知识扩展——用户原则渐进） ----
+    # 阶段 B：复杂句减少对照（用户指示——判断退化是否因复杂句过多）
+    sents_b = load_corpus(os.path.join(base, "corpus_simple_natural.txt"), 302)
+    sents_b += load_corpus(os.path.join(base, "corpus_wiki_filtered.txt"), 300, preserve_order=True)
+    print(f"\n阶段 B 语料：{len(sents_b)} 句（简单 {302} + 知识 {300}——复杂句减少对照——知识占 1/3）")
+    # B 阶段扩展字集（新字加入——旧字保留——渐进）
+    freq_b = Counter("".join(sents_b))
+    new_chars = [c for c, _ in freq_b.most_common(300) if c not in w.ci]
+    for c in new_chars[:150]:   # 最多扩 150 字
+        w.chars.append(c)
+        w.ci[c] = len(w.chars) - 1
+        w.omega = np.append(w.omega, RNG.uniform(OMEGA_LO, OMEGA_HI))
+        w.z = np.append(w.z, 0.1 * np.exp(1j * RNG.uniform(0, 2 * np.pi)))
+        w.K = np.pad(w.K, ((0, 1), (0, 1)))
+        w.act = np.append(w.act, 0.0)
+    print(f"字集扩展：{len(w.chars)}（+{len(new_chars[:150])} 新字）")
+    for ep in range(25):
+        w.learn_epoch(sents_b)
+    clusters = w.clusters(th=0.05)   # B 阈值放宽（新字弱耦合也纳入——350 字 25 epoch 结构成形）
+    big = [c for c in clusters if len(c) >= 2]
+    print(f"[阶段B] 字湖模块 = {len(big)}——top6:")
+    for ci, members in enumerate(big[:6]):
+        print(f"      湖{ci}: [{''.join(w.chars[i] for i in members)}] 相干={w.coherence(members):.2f}")
+    w.lake_members = [c for c in big if len(c) >= 2]
+    topic = TopicLayer(len(w.lake_members))
+    for ep in range(25):
+        for s in sents_b:
+            sig = w.sentence_sig(s)
+            topic.learn(sig / np.maximum(sig.sum(), 1e-9))
+        topic.epoch_end()
+    tbig = [t for t in topic.topics() if len(t) >= 2]
+    print(f"[阶段B] 话题湖 = {len(tbig)}——top6:")
     for ti, members in enumerate(tbig[:6]):
-        names = [f"L{m}" for m in members]
-        # 每个成员湖的字（前 6 字）
-        words = ["".join(chars[i] for i in w.lake_members[m][:6]) for m in members]
-        print(f"      话题{ti}: {names} = [{'; '.join(words)}]")
-    # ---- exp4：尺度递归检查 ----
-    print(f"[exp4] 两层同机制（K 模块/L 模块——R16 尺度递归）——"
-          f"字湖 {len(big)} → 话题湖 {len(tbig)}——高层 = 低层湖的组合")
+        words = ["".join(w.chars[i] for i in w.lake_members[m][:6]) for m in members]
+        print(f"      话题{ti}: [{'; '.join(words)}]")
+    print(f"\n[exp4] 两阶段渐进：字湖 {len(big)} + 话题湖 {len(tbig)}（混合加难——扩展结构）")
     # 图：K 与 L
     fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
     im = axes[0].imshow(w.K, cmap="viridis")
