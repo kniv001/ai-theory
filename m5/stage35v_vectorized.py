@@ -36,6 +36,9 @@ P_ADD_CONN = 0.10
 P_ADD_NODE = 0.05
 P_DISABLE = 0.05
 NUT_DEEP = 0.25     # 0.4 太富 → 种群爆炸（seed203 上千细胞——O(n²) 拖垮性能）→ 回 0.25（stage34 验证种群可控）
+GRP_W = float(os.environ.get("STAGE35_GRPW", "1.0"))   # 群体级资源权重（0.3-1.0 扫描——分化-协调平衡）
+GAP = 50            # 世代落盘间隔：文件写/删只在 GAP 倍数步执行（IO ÷50——运行中纯内存）
+NIGHT_NUT = 1.5     # 夜间营养倍数（2.0 太富→种群爆炸——1.5 折衷：夜间下潜收益保留但可控）
 NUT_S_CLIP = (0.2, 1.6)
 T_DIURNAL = 200
 T_DAY = 100
@@ -91,16 +94,45 @@ class CoordWorldV:
         self.next_id = 0
         self.next_gid = 0
         self.phase_t = 0
-        self.arr = None      # (N, 9) [x, y, e, tau, d, s, a, c, gid]
+        self.arr = None      # (N, 10) [x, y, e, tau, d, s, a, c, gid, bid]
         self.g_mat = None    # (N, MAX_C, 4) 连接表 padding（0 = 空连接）
         self.g_len = None    # (N,) 实际连接数
         self.n_nodes = np.zeros(n0, dtype=int)   # (N,) 节点数
-        self.pending = []    # 繁殖缓冲（步末合并）
+        self.pending = []    # 繁殖缓冲（步末合并数组）
+        self.step_count = 0
         for _ in range(n0):
             self._spawn_new()
         self._flush()
         self.history = []
         self.kills = 0
+
+    def savesnapshot(self):
+        """单文件快照（用户方案）：所有生物数据存一个 bios.npz——
+        删除 = 数组删行 + 批量保存（大文件内该生物字段消失）——
+        IO = 每 GAP 步 1 次大文件写（vs N 个独立文件——syscall ÷N）"""
+        np.savez(f"{self.workdir}/bios.npz",
+                 arr=self.arr, g_mat=self.g_mat, g_len=self.g_len,
+                 n_nodes=self.n_nodes, next_id=self.next_id, next_gid=self.next_gid,
+                 step_count=self.step_count)
+
+    @staticmethod
+    def load(workdir, n0=60, seed=109):
+        """从快照恢复世界（评估/复用——单文件读取一次恢复全种群）"""
+        d = np.load(f"{workdir}/bios.npz", allow_pickle=False)
+        w = CoordWorldV.__new__(CoordWorldV)
+        w.workdir = workdir
+        w.next_id = int(d["next_id"])
+        w.next_gid = int(d["next_gid"])
+        w.phase_t = int(d["step_count"])
+        w.step_count = int(d["step_count"])
+        w.arr = d["arr"]
+        w.g_mat = d["g_mat"]
+        w.g_len = d["g_len"]
+        w.n_nodes = d["n_nodes"]
+        w.pending = []
+        w.history = []
+        w.kills = 0
+        return w
 
     def _flush(self):
         """步末合并缓冲繁殖（一次 vstack/concat——消除 O(N²) 重分配）"""
@@ -131,11 +163,10 @@ class CoordWorldV:
         bid = self.next_id
         self.next_id += 1
         g = init_genome(RNG)
-        np.save(f"{self.workdir}/bio_{bid}.npy", g)
         row = np.array([[RNG.uniform(0, W), RNG.uniform(0, H), RNG.uniform(30, 60),
                          0.0, RNG.uniform(0.1, 0.4), RNG.uniform(0.5, 1.2),
                          RNG.uniform(0.1, 0.4), RNG.uniform(0.2, 0.8),
-                         float(self.next_gid)]])
+                         float(self.next_gid), float(bid)]])
         self.next_gid += 1
         self._append_cell(row, g)
         return bid
@@ -148,8 +179,7 @@ class CoordWorldV:
         bid = self.next_id
         self.next_id += 1
         g = mutate_genome(self.g_mat[idx, :self.g_len[idx]], RNG)
-        np.save(f"{self.workdir}/bio_{bid}.npy", g)
-        px, py, pe, pt, pd, ps, pa, pc, pgid = self.arr[idx]
+        px, py, pe, pt, pd, ps, pa, pc, pgid, _bid = self.arr[idx]
         nd = np.clip(pd * RNG.uniform(0.9, 1.1), 0.0, 1.0)
         ns = np.clip(ps * RNG.uniform(0.8, 1.2), S_MIN, 1.7)
         na = np.clip(pa * RNG.uniform(0.9, 1.1), 0.0, 1.0)
@@ -164,17 +194,16 @@ class CoordWorldV:
                 sid = self.next_id
                 self.next_id += 1
                 g2 = mutate_genome(self.g_mat[idx, :self.g_len[idx]], RNG)
-                np.save(f"{self.workdir}/bio_{sid}.npy", g2)
                 row2 = np.array([[np.clip(px + off + RNG.uniform(-3, 3), 0, W),
                                   np.clip(py + off + RNG.uniform(-3, 3), 0, H),
                                   pe * 0.15, 0.0, nd, RNG.uniform(0.5, 0.65),
-                                  RNG.uniform(0.4, 0.6), 0.2, float(child_gid)]])
+                                  RNG.uniform(0.4, 0.6), 0.2, float(child_gid), float(sid)]])
                 self._append_cell(row2, g2)
         else:
             child_gid = pgid
             self.arr[idx, 2] = pe / 2.0
         row = np.array([[np.clip(px + off, 0, W), np.clip(py + off, 0, H),
-                         child_e, 0.0, nd, ns, na, 0.5, child_gid]])
+                         child_e, 0.0, nd, ns, na, 0.5, child_gid, float(bid)]])
         self._append_cell(row, g)
 
     def _kill(self, idx):
@@ -279,12 +308,20 @@ class CoordWorldV:
         lc_best = dlc.argmin(axis=1)
         g_sin = np.sin(np.arctan2(LIGHTS[lc_best, 1] - cy, LIGHTS[lc_best, 0] - cx))
         g_cos = np.cos(np.arctan2(LIGHTS[lc_best, 1] - cy, LIGHTS[lc_best, 0] - cx))
-        # 资源（按群体中心深度）
-        deep = cy > 50
-        nutrient = np.where(deep, NUT_DEEP * np.clip(s, *NUT_S_CLIP), 0.0)
-        intensity = np.where(deep, intensity * 0.3, intensity * 1.5)
+        # 资源混合（GRP_W 群体级 + (1-GRP_W) 个体级——分化-协调平衡）：
+        #   群体级 = 按群体中心深度（协调收益——迁移=全体资源切换）
+        #   个体级 = 按个体深度（体积生态位——大 s 深层独立吸营养——分化保持）
+        deep_g = cy > 50
+        deep_i = y > 50
+        nut_g = np.where(deep_g, NUT_DEEP * np.clip(s, *NUT_S_CLIP), 0.0)
+        nut_i = np.where(deep_i, NUT_DEEP * np.clip(s, *NUT_S_CLIP), 0.0)
+        nutrient = GRP_W * nut_g + (1.0 - GRP_W) * nut_i
+        int_g = np.where(deep_g, intensity * 0.3, intensity * 1.5)
+        int_i = np.where(deep_i, intensity * 0.3, intensity * 1.5)
+        intensity = GRP_W * int_g + (1.0 - GRP_W) * int_i
         if night:
             intensity *= 0.1
+            nutrient *= NIGHT_NUT   # 夜间深层营养更强（真实 DVM：夜间下潜就是为了吃营养）
         # 输入矩阵（N×15——顺序与逐细胞版一致）
         inp = np.column_stack([np.sin(l_ang), np.cos(l_ang), l_d / 70.0,
                                intensity, crowd / 20.0, t_sin, t_cos,
@@ -338,12 +375,15 @@ class CoordWorldV:
         for i in reps[::-1]:
             self._reproduce(i)
         if dead_mask.any():
-            keep = ~dead_mask
+            keep = ~dead_mask   # 删除 = 数组删行（单文件保存时该生物字段自动消失——用户方案）
             self.arr = self.arr[keep]
             self.g_mat = self.g_mat[keep]
             self.g_len = self.g_len[keep]
             self.n_nodes = self.n_nodes[keep]
         self._flush()   # 步末合并繁殖缓冲
+        self.step_count += 1
+        if self.step_count % GAP == 0:
+            self.savesnapshot()   # 单文件快照（每 GAP 步 1 次大文件写）
         # 统计
         if len(self.arr):
             cs_ = self.arr[:, 7]
@@ -374,6 +414,29 @@ def run_seed(seed, T=2000):
     return h, live, germ, soma, coord
 
 
+def run_scan():
+    """资源混合扫描：GRP_W ∈ {1.0, 0.7, 0.5, 0.3} × 5 seed——分化-协调平衡点"""
+    global GRP_W
+    print("=== 资源混合扫描（分化-协调平衡——GRP_W 群体级权重） ===\n")
+    for gw in [1.0, 0.7, 0.5, 0.3]:
+        GRP_W = gw
+        n_diff = 0; n_coord = 0; n_live = 0
+        coords = []
+        for seed in [109, 203, 307, 411, 503]:
+            w = CoordWorldV(workdir=f"stage35v_evo_{seed}", n0=60, seed=seed)
+            h = w.run(1500)
+            live = np.mean(h[500:, 0] > 5)
+            germ, soma = h[-1, 2], h[-1, 3]
+            coord = np.mean(h[500:, 6])
+            n_live += live >= 0.5
+            n_diff += (germ > 2 and soma > 2)
+            n_coord += coord > 0.5
+            coords.append(coord)
+        print(f"GRP_W={gw}: 分化 {n_diff}/5 | 协调>0.5 {n_coord}/5 | 自持 {n_live}/5 | "
+              f"协调均值 {np.mean(coords):.2f}")
+    print("[done] stage35v resource mix scan")
+
+
 def run():
     print("=== stage35v：CPU 向量化版（机制同 stage35——逐细胞循环 → numpy 批量） ===\n")
     results = []
@@ -393,4 +456,7 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    if os.environ.get("STAGE35_SCAN") == "1":
+        run_scan()
+    else:
+        run()
