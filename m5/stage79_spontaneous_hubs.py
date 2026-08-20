@@ -59,9 +59,14 @@ def load_corpus(path, lo=3, hi=80, n=None):
 
 # ---------- exp1：自发词块 + 单字枢纽（纯统计——C15-01/C15-02/C16-01 尺度递归） ----------
 
-def extract_blocks(sents, min_co=8, ratio=0.5):
+def extract_blocks(sents, min_co=8, ratio=0.85):
     """词块提取（自发分词）：相邻共现率 > ratio → 词块
     相邻率 = 相邻共现 / min(单字出现)——"因为" 94/94=1.0——纯统计（非词表）
+    ratio=0.85（2026-08-21 修正——stage86 两次发现"很甜"(0.73)/"很香"(0.67)
+      成块绑架功能字"很"——K[很] 属性河道消失——C15-02 违反：弥散枢纽不应
+      被聚类内容锁死——覆盖度对低配字严格：因 100% 给为（因为✓）/甜 73%
+      给很（很甜✗）——0.85 分离；"火车/吃饭"等低覆盖内容块被滤→字级检索
+      兜底（"吃/跑"回单字枢纽——动作河道反而恢复）
     纯汉字块（标点/拉丁相邻对——'，但'/',0'——过滤）
     C16-01 尺度递归：字→词——词块 = 字级统计的递归应用"""
     freq = Counter()
@@ -84,12 +89,28 @@ def extract_blocks(sents, min_co=8, ratio=0.5):
 def extract_hubs(sents, blocks, top_n=24, min_freq=30):
     """单字枢纽：频率 × 上下文熵 × 位置集中度——词块内字排除（词块已覆盖）
     频率：结构锚候选；上下文熵：内容词受限/功能词弥散（C15-02）；
-    位置集中度：结构位（"是"句中/"很"句中——句内 std 小）"""
+    位置集中度：结构位（"是"句中/"很"句中——句内 std 小）
+    块内豁免（2026-08-21——stage86："很甜"块（率0.87）绑架"很"——结构字
+      被内容块锁死——C15-02 违反——豁免：块外出现仍 ≥ min_freq 的字
+      保留单字枢纽（"很"100-13=87 ✓——"甜"15-13=2 留块内——属性词正确）"""
+    in_block = set("".join(blocks))
+    block_cnt = Counter()
+    for b in blocks:
+        block_cnt[b[0]] += 1
+        block_cnt[b[1]] += 1
+    # 第一遍：总频率（不排除——豁免判定用）
+    freq_all = Counter()
+    for s in sents:
+        freq_all.update(s)
+    # 豁免：块外出现仍 ≥ min_freq 的字保留单字枢纽（"很"100-13=87 ✓）
+    for c in list(in_block):
+        if freq_all[c] - block_cnt[c] >= min_freq:
+            in_block.discard(c)
+    # 第二遍：排除剩余 in_block 统计
     freq = Counter()
     ctx_pre = defaultdict(set)
     ctx_post = defaultdict(set)
     pos = defaultdict(list)
-    in_block = set("".join(blocks))
     for s in sents:
         L = len(s)
         for i, c in enumerate(s):
