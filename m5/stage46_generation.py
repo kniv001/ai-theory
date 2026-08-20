@@ -32,7 +32,7 @@ N_CHAR = 300
 RELS = ["isa", "attr", "act", "cause"]
 REL_IDX = {r: i for i, r in enumerate(RELS)}
 MAX_LEN = 20          # 生成长度上限
-STOP_CHARS = set("了的吗呢吧啊。")
+STOP_CHARS = set("。！？吗呢吧啊")   # 功能字（的/了）是连接词非句尾——去掉（断链根因）
 
 def rel_of(sent):
     if "因为" in sent or "所以" in sent:
@@ -46,7 +46,9 @@ def rel_of(sent):
 def load_corpus(path, lo=3, hi=80, n=None):
     with open(path, encoding="utf-8") as f:
         lines = [l.strip() for l in f if l.strip()]
-    clean = [s for s in lines if lo <= len(s) <= hi and re.search(r"[一-鿿]", s)]
+    # 含中文且不含拉丁字母（"人口为"BMa..." 类污染排除）
+    clean = [s for s in lines if lo <= len(s) <= hi
+             and re.search(r"[一-鿿]", s) and not re.search(r"[A-Za-z]", s)]
     if n and len(clean) > n:
         clean = clean[:n]
     return clean
@@ -139,22 +141,17 @@ class Generator:
                 self.bigram[s[k:k + 2]] += 1
         self.Ksum = w.K.sum(axis=0)
 
-    def predict_next(self, last2):
-        """给定最后 2 字 → 候选下一字（bigram 方向优先——回退 K）"""
+    def predict_all(self, last2):
+        """所有候选（降序——bigram 方向优先——回退 K）"""
         cands = []
-        # bigram 方向（last2 → c）
-        for (bg, cnt), c in self.bigram.items():
-            pass
-        # bigram 中 last2 前缀的后续字
         for (bg, cnt) in self.bigram.items():
-            if bg[:1] == last2[-1] and bg[0] == last2[-1]:
+            if bg[0] == last2[-1]:
                 nxt = bg[1]
-                if nxt in self.w.ci:
+                if nxt in self.w.ci and nxt != last2[-1]:
                     cands.append((nxt, cnt))
+        cands.sort(key=lambda x: -x[1])
         if cands:
-            best = max(cands, key=lambda x: x[1])
-            return best
-        # 回退：K 关联（last2 末字 → 强关联字）
+            return cands
         last = last2[-1]
         if last in self.w.ci:
             i = self.w.ci[last]
@@ -162,20 +159,27 @@ class Generator:
             top = np.argsort(row)[::-1][:5]
             for j in top:
                 if row[j] > 0.03 and self.w.chars[j] != last:
-                    return (self.w.chars[j], row[j])
-        return None
+                    return [(self.w.chars[j], row[j])]
+        return []
 
     def generate(self, seed, max_len=MAX_LEN):
-        """从起始词生成（逐字预测——预测河下行）"""
+        """从起始词生成（逐字预测——anti-repetition——循环检测）"""
         out = seed
         for _ in range(max_len):
-            nxt = self.predict_next(out[-2:])
-            if nxt is None:
+            cands = self.predict_all(out[-2:])
+            chosen = None
+            for c, strength in cands:
+                if c in STOP_CHARS or strength < 0.005:
+                    continue
+                trial = out + c
+                # anti-repetition：最后 4 字若已出现过 → 跳过（循环检测）
+                if len(trial) >= 4 and trial[-4:] in out:
+                    continue
+                chosen = (c, strength)
                 break
-            c, strength = nxt
-            if c in STOP_CHARS or strength < 0.005:
+            if chosen is None:
                 break
-            out += c
+            out += chosen[0]
         return out
 
 
