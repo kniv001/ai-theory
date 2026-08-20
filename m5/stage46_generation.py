@@ -131,15 +131,63 @@ class RelLake:
 
 
 class Generator:
-    """生成器：预测河下行（R2）——bigram 方向 × K 关联"""
+    """生成器：词组级（C13-02 组合性——词组为单元——不是逐字 bigram）
+    词组单元（K 提取——跨句重复）→ 词组共现统计（同句——距离加权）→ 词组链生成"""
     def __init__(self, w, sents):
         self.w = w
-        # bigram 方向统计（语料顺序——"农业"→"属"）
-        self.bigram = Counter()
+        self.Ksum = w.K.sum(axis=0)
+        # 词组单元（K 强耦合——跨句重复涌现——stage44）
+        self.words = self._extract_words(sents)
+        self.word_set = {wd for wd, _ in self.words}
+        # 词组共现统计（同句——距离加权——"农业"与"作物/种植/产业"）
+        self.wpairs = Counter()
+        for s in sents:
+            seq = self.sentence_composition(s)
+            for i in range(len(seq)):
+                for j in range(i + 1, len(seq)):
+                    if seq[i] in self.word_set and seq[j] in self.word_set:
+                        self.wpairs[(seq[i], seq[j])] += 1.0 / (j - i)
+
+    def _extract_words(self, sents, th=0.025):
+        K = self.w.K[REL_IDX["isa"]]
+        adj = Counter()
         for s in sents:
             for k in range(len(s) - 1):
-                self.bigram[s[k:k + 2]] += 1
-        self.Ksum = w.K.sum(axis=0)
+                adj[s[k:k + 2]] += 1
+        words = {}
+        used = set()
+        n = len(self.w.chars)
+        for i in range(n):
+            if i in used:
+                continue
+            for j in range(i + 1, n):
+                if K[i, j] > th:
+                    words[(i, j)] = K[i, j]
+                    used.add(j)
+                    break
+        out = []
+        for (a, b), k in sorted(words.items(), key=lambda x: -x[1]):
+            ca, cb = self.w.chars[a], self.w.chars[b]
+            if adj[cb + ca] > adj[ca + cb] and adj[cb + ca] > 0:
+                out.append((cb + ca, k))
+            else:
+                out.append((ca + cb, k))
+        return out
+
+    def sentence_composition(self, sent):
+        seq = []
+        i = 0
+        while i < len(sent) - 1:
+            two = sent[i:i + 2]
+            if two in self.word_set:
+                seq.append(two)
+                i += 2
+            else:
+                seq.append(sent[i])
+                i += 1
+        if i < len(sent):
+            seq.append(sent[i])
+        return seq
 
     def predict_all(self, last2):
         """所有候选（降序——bigram 方向优先——回退 K）"""
@@ -162,8 +210,26 @@ class Generator:
                     return [(self.w.chars[j], row[j])]
         return []
 
+    def generate_word_chain(self, seed_word, max_len=8):
+        """词组级生成：起始词组 → 共现强链（词组为单元——C13-02 组合性）"""
+        chain = [seed_word]
+        for _ in range(max_len):
+            cur = chain[-1]
+            # 与当前词组共现最强的后续词组（未用过——anti-repetition）
+            cands = []
+            for (a, b), cnt in self.wpairs.items():
+                if a == cur and b not in chain:
+                    cands.append((b, cnt))
+                if b == cur and a not in chain:
+                    cands.append((a, cnt))
+            if not cands:
+                break
+            cands.sort(key=lambda x: -x[1])
+            chain.append(cands[0][0])
+        return " → ".join(chain)
+
     def generate(self, seed, max_len=MAX_LEN):
-        """从起始词生成（逐字预测——anti-repetition——循环检测）"""
+        """兼容旧接口：字级生成（保留——词组级为主）"""
         out = seed
         for _ in range(max_len):
             cands = self.predict_all(out[-2:])
@@ -172,7 +238,6 @@ class Generator:
                 if c in STOP_CHARS or strength < 0.005:
                     continue
                 trial = out + c
-                # anti-repetition：最后 4 字若已出现过 → 跳过（循环检测）
                 if len(trial) >= 4 and trial[-4:] in out:
                     continue
                 chosen = (c, strength)
@@ -198,32 +263,19 @@ def run():
             w.learn_epoch(simple + block)
     print(f"训练完成——字集 {len(chars)}")
     gen = Generator(w, simple + wiki)
-    # ---- exp1：逐字生成 ----
-    print("\n[exp1] 逐字生成（预测河下行——给定起始词）:")
-    seeds = ["农业", "技术", "教育", "今天", "经济", "环境"]
+    # ---- exp1：词组级生成（C13-02——词组为单元） ----
+    print("\n[exp1] 词组级生成（起始词组 → 共现强链——组合性）:")
+    seeds = ["农业", "技术", "教育", "经济", "环境", "动物"]
     for sd in seeds:
-        s = gen.generate(sd)
-        print(f"      '{sd}' → '{s}'")
-    # ---- exp2：词组链 ----
-    print("\n[exp2] 词组链生成（起始词 → 预测链——词组级）:")
-    for sd in ["农业", "技术"]:
-        chain = [sd]
-        cur = sd
-        for _ in range(6):
-            nxt = gen.predict_next(cur[-2:])
-            if nxt is None:
-                break
-            cur = cur + nxt[0]
-            chain.append(nxt[0])
-        print(f"      '{sd}' → {' → '.join(chain[:5])}")
-    # ---- exp3：与语料对比（合理性——bigram 覆盖率） ----
-    print("\n[exp3] 生成句与语料 bigram 覆盖率（生成 = 关系统计的合成——C122-01）:")
-    gen_sents = [gen.generate(sd) for sd in seeds]
-    bg_total = sum(gen.bigram.values())
-    for s in gen_sents:
-        hit = sum(gen.bigram.get(s[k:k + 2], 0) for k in range(len(s) - 1))
-        cov = hit / max(sum(gen.bigram.get(s[k:k + 2], 0) for k in range(len(s) - 1)) + 1e-9, 1)
-        print(f"      '{s}'——bigram 命中 {hit}")
+        if sd in gen.word_set:
+            s = gen.generate_word_chain(sd)
+            print(f"      '{sd}' → {s}")
+        else:
+            print(f"      '{sd}' → （未成词组——语料覆盖不足）")
+    # ---- exp2：词组单元展示 ----
+    print("\n[exp2] 词组单元（K 提取——跨句重复）top10:")
+    for wd, k in gen.words[:10]:
+        print(f"      '{wd}' K={k:.3f}")
     print("\n[done] stage46 generation")
 
 
