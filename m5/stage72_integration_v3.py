@@ -125,8 +125,8 @@ class PipelineLake:
                 dz[act] += Ka @ z[act].real + 1j * (Ka @ z[act].imag) - z[act] * rsum[act]
             dz += drive[:self.n]
             z = z + dz * DT
-            over = np.abs(z[active]) > 3.0
-            z[active][over] = z[active][over] / np.abs(z[active][over]) * 2.0
+            over = np.abs(z) > 3.0            # 全量裁剪（非 active 也保护——防耦合驱动发散）
+            z[over] = z[over] / np.abs(z[over]) * 2.0
             self.z[:self.n] = z
             self.t += DT
         return np.abs(z)
@@ -141,6 +141,8 @@ class PipelineLake:
             amp = self.inject(sent)
             sub = np.array(idx)
             A = amp[sub] * np.maximum(1.0 - self.h[sub], 0.05)   # 关键期
+            if not np.all(np.isfinite(A)):   # 沉积防御（NaN 传播阻断）
+                continue
             L = len(idx)
             d_idx = np.arange(L)
             dist_w = 1.0 / np.maximum(np.abs(d_idx[:, None] - d_idx[None, :]), 1.0)
