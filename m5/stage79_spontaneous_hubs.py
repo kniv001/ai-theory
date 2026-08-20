@@ -143,10 +143,11 @@ class HubLake:
     动力学：多河道线性叠加 = K_total@z（合并一次矩阵乘）"""
 
     def __init__(self, chars, hubs):
-        self.chars = chars
+        self.chars = list(chars)
         self.ci = {c: i for i, c in enumerate(chars)}
         self.hubs = [h for h in hubs if all(c in self.ci for c in h)]
         n = len(chars)
+        self.n = n
         self.omega = RNG.uniform(OMEGA_LO, OMEGA_HI, n)
         self.gamma = GAMMA
         self.z = 0.1 * np.exp(1j * RNG.uniform(0, 2 * np.pi, n))
@@ -160,10 +161,49 @@ class HubLake:
         self.KT = sum(self.K.values())
         self.rsT = sum(self.rowsum.values())
 
+    def remember(self, c):
+        """动态词汇扩展（stage87——持续学习——C2-06 结构永不冻结：
+        训练中遇新字 → 湖扩展（所有河道矩阵扩列）——O(n²) 拼接——新字少可接受）"""
+        if c in self.ci:
+            return self.ci[c]
+        n = self.n
+        for h in self.hubs:
+            Kh = self.K[h]
+            Kh2 = np.zeros((n + 1, n + 1))
+            Kh2[:n, :n] = Kh
+            self.K[h] = Kh2
+            rs2 = np.zeros(n + 1)
+            rs2[:n] = self.rowsum[h]
+            self.rowsum[h] = rs2
+        self.chars.append(c)
+        self.ci[c] = n
+        self.omega = np.append(self.omega, RNG.uniform(OMEGA_LO, OMEGA_HI))
+        self.z = np.append(self.z, 0.1 * np.exp(1j * RNG.uniform(0, 2 * np.pi)))
+        self.n += 1
+        return n
+
+    def add_hub(self, h):
+        """新枢纽河道（持续学习——新语料的新词块/单字——C2-02 结构生长：
+        湖结构是训练产物——持续学习中新河道加入）"""
+        if h in self.K or not all(c in self.ci for c in h):
+            return
+        n = self.n
+        self.hubs.append(h)
+        self.K[h] = np.zeros((n, n))
+        self.rowsum[h] = np.zeros(n)
+        self._sync_total()
+
     def learn_epoch_batch(self, sents, B=128):
         n = len(self.chars)
         for start in range(0, len(sents), B):
             batch = sents[start:start + B]
+            # 动态词汇扩展（batch 内新字先入湖——持续学习——C2-06）
+            for sent in batch:
+                for c in sent:
+                    if c not in self.ci:
+                        self.remember(c)
+            n = self.n
+            self._sync_total()
             Z = np.zeros((len(batch), n), dtype=complex)
             drives = np.zeros((len(batch), n), dtype=complex)
             seqs = []
