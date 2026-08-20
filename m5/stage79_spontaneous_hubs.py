@@ -86,7 +86,7 @@ def extract_blocks(sents, min_co=8, ratio=0.85):
     return blocks
 
 
-def extract_hubs(sents, blocks, top_n=24, min_freq=30):
+def extract_hubs(sents, blocks, top_n=50, min_freq=30):
     """单字枢纽：频率 × 上下文熵 × 位置集中度——词块内字排除（词块已覆盖）
     频率：结构锚候选；上下文熵：内容词受限/功能词弥散（C15-02）；
     位置集中度：结构位（"是"句中/"很"句中——句内 std 小）
