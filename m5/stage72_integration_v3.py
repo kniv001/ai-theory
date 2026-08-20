@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-M5 阶段 72：综合链路 v3（完整训练管线——所有机制组装——端到端"少时间多学习"）
+M5 阶段 72：综合链路 v4（完整训练管线——所有机制组装——端到端"少时间多学习"
++ 模板生成端收编——hardcoded_audit 待办⑥——stage78 模板驱动并入）
 
 组装（加法——完整管线）：
   ① 单字学习（stage60——身份稳定前置）
@@ -12,13 +13,18 @@ M5 阶段 72：综合链路 v3（完整训练管线——所有机制组装—�
   ⑦ 睡眠（stage66——重放巩固+清噪——间隔）
   ⑧ 关键期（stage68——h 硬度——后期固化）
   ⑨ 词汇记忆（stage59——动态增长）
-端到端：训练管线 → 理解（关系/因果/问答）→ 生成（词组链）
+  ⑩ 模板生成（stage78——C20-01 整体先行——句来填字——自发枢纽模板）
+端到端：训练管线 → 理解（关系/因果/问答）→ 生成（模板驱动——句来填字）
 """
 import os
 import re
+import sys
 import time
 from collections import Counter
 import numpy as np
+
+if sys.stdout.encoding and sys.stdout.encoding.lower().startswith("gb"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 RNG = np.random.default_rng(72)
 DT = 0.05
@@ -215,9 +221,65 @@ class PipelineLake:
             out += nxt
         return out
 
+    def template_generate(self, seed, templates, hubs, max_steps=3):
+        """模板驱动生成（v4——C20-01 整体先行——句来填字——stage78 并入）
+        模板选择：种子与模板枢纽的 K 关联（"苹果"↔"很"强 → 属性模板）
+        实例化：整体结构（X[枢纽]Y）→ 槽位填充（Y = 枢纽行 K 预测）
+        链：多模板实例化（句链——C13-02 组合性）"""
+        out = seed
+        for _ in range(max_steps):
+            last = out[-1]
+            if last not in self.ci:
+                break
+            i = self.ci[last]
+            best_t, best_k = None, 0.0
+            for t in templates:
+                h = t[1] if len(t) >= 2 else None      # 单枢纽模板的枢纽字
+                if h and h in self.ci:
+                    k = self.K[i, self.ci[h]]
+                    if k > best_k:
+                        best_t, best_k = t, k
+            if best_t is None or best_k < 0.002:
+                break
+            fw = best_t[1]
+            if fw in self.ci:
+                j = self.ci[fw]
+                row = self.K[j].copy()
+                top = np.argsort(row)[::-1]
+                y = None
+                for k in top:
+                    if row[k] > 0.002 and self.chars[k] not in out and self.chars[k] != last:
+                        y = self.chars[k]
+                        break
+                if y is None:
+                    break
+                out = out + fw + y
+        return out
+
+
+def extract_templates(sents, hubs, min_cnt=5):
+    """自发模板（v4——C20-01——替换人工模板库）：句子命中的枢纽序列（按句中位置）
+    "苹果很甜" → 命中[很] → (X, 很, Y)；"因为下雨所以带伞" → 命中[因为,所以]
+    → (X, 因为, X, 所以, X)——模板从语料统计涌现（C122-01 规则=关系统计）"""
+    tmpl = Counter()
+    for s in sents:
+        hits = sorted([h for h in hubs if h in s], key=s.index)
+        if not hits:
+            continue
+        parts = []
+        for i, h in enumerate(hits):
+            if i == 0 and s.index(h) > 0:
+                parts.append("X")
+            elif i > 0:
+                parts.append("X")
+            parts.append(h)
+        parts.append("X")
+        tmpl[tuple(parts)] += 1
+    return [t for t, c in tmpl.items() if c >= min_cnt]
+
 
 def run():
-    print("=== M5 阶段 72：综合链路 v3（完整训练管线——端到端） ===\n")
+    print("=== M5 阶段 72：综合链路 v4（完整训练管线 + 模板生成端） ===\n")
     base = os.path.dirname(__file__)
     simple = load_corpus(os.path.join(base, "corpus_simple_natural.txt"), n=900)
     wiki = load_corpus(os.path.join(base, "corpus_wiki_filtered.txt"), n=600)
@@ -246,11 +308,24 @@ def run():
     for c in ["苹", "天", "学"]:
         ans = w.answer(c)
         print(f"      '{c}' → {[(a, f'{v:.2f}') for a, v in ans[:3]]}")
-    print("\n[生成] 词组链（组合性生成面）:")
-    for sd in ["苹果", "天气", "学习"]:
+    print("\n[生成·对照] 字推字（旧——逐字链——漂移风险）:")
+    for sd in ["苹果", "天气", "小猫"]:
         print(f"      '{sd}' → '{w.generate(sd)}'")
-    print("\n[管线] 单字→课程→密集→稀疏→误差→价值→睡眠→关键期→记忆——全链 ✓")
-    print("[done] stage72 integration v3")
+    # 模板生成（v4——整体先行——句来填字）
+    # 自发枢纽（stage79 机制——词块+单字——统计涌现——非人工词表）
+    from stage79_spontaneous_hubs import extract_blocks, extract_hubs
+    blocks = extract_blocks(ordered)
+    hubs = extract_hubs(ordered, blocks)
+    templates = extract_templates(ordered, set(blocks + hubs))
+    print(f"\n[模板] 自发模板库（C20-01——语料统计涌现——{len(templates)} 个——top5）:")
+    for t in templates[:5]:
+        print(f"      {list(t)}")
+    print("\n[生成·v4] 模板驱动（整体先行——句来填字——C20-01）:")
+    for sd in ["苹果", "天气", "小猫", "水", "猫"]:
+        g = w.template_generate(sd, templates, set(hubs))
+        print(f"      '{sd}' → '{g}'")
+    print("\n[管线] 单字→课程→密集→稀疏→误差→价值→睡眠→关键期→记忆→模板生成——全链 ✓")
+    print("[done] stage72 integration v4")
 
 
 if __name__ == "__main__":
