@@ -56,43 +56,46 @@ def step_dynamics(z, omega, gamma, K, rowsum, drive, dt):
 
 class PipelineLake:
     """完整训练管线湖（单字→课程→密集→稀疏→误差→价值→睡眠→关键期→记忆）"""
-    def __init__(self, chars):
+    def __init__(self, chars, max_buf=4000):
         self.chars = list(chars)
         self.ci = {c: i for i, c in enumerate(self.chars)}
         n = len(self.chars)
-        self.omega = RNG.uniform(OMEGA_LO, OMEGA_HI, n)
+        self.max_n = n + max_buf          # 预分配（动态词汇——不每字 append 复制）
+        self.n = n                        # 实际使用数量
+        self.omega = np.zeros(self.max_n)
+        self.omega[:n] = RNG.uniform(OMEGA_LO, OMEGA_HI, n)
         self.gamma = GAMMA
-        self.z = 0.1 * np.exp(1j * RNG.uniform(0, 2 * np.pi, n))
+        self.z = np.zeros(self.max_n, dtype=complex)
+        self.z[:n] = 0.1 * np.exp(1j * RNG.uniform(0, 2 * np.pi, n))
         self.t = 0.0
-        self.K = np.zeros((n, n))
-        self.rowsum = np.zeros(n)
+        self.K = np.zeros((self.max_n, self.max_n))
+        self.rowsum = np.zeros(self.max_n)
         self.neighbors = None
         self.marked = []
-        self.h = np.full(n, 0.1)
+        self.h = np.full(self.max_n, 0.1)
         self.new_memories = 0
 
     def remember(self, c):
-        """词汇记忆（stage59——动态增长）"""
+        """词汇记忆（stage59——动态增长——预分配——O(1)）"""
         if c in self.ci:
             return self.ci[c]
-        i = len(self.chars)
+        i = self.n
         self.chars.append(c)
         self.ci[c] = i
-        self.omega = np.append(self.omega, RNG.uniform(OMEGA_LO, OMEGA_HI))
-        self.z = np.append(self.z, 0.1 * np.exp(1j * RNG.uniform(0, 2 * np.pi)))
-        self.K = np.pad(self.K, ((0, 1), (0, 1)))
-        self.rowsum = np.append(self.rowsum, 0.0)
-        self.h = np.append(self.h, 0.1)
+        self.omega[i] = RNG.uniform(OMEGA_LO, OMEGA_HI)
+        self.z[i] = 0.1 * np.exp(1j * RNG.uniform(0, 2 * np.pi))
+        self.h[i] = 0.1
+        self.n += 1
         if self.neighbors is not None:
-            self.neighbors.append([])   # 同步扩展邻居表（动态词汇）
+            self.neighbors.append([])
         self.new_memories += 1
         return i
 
     def build_neighbors(self):
-        n = len(self.chars)
+        n = self.n
         self.neighbors = []
         for i in range(n):
-            row = self.K[i]
+            row = self.K[i, :n]   # 只排有效区（预分配缓冲区 0 值索引不可入选）
             self.neighbors.append(np.argsort(row)[::-1][:NEIGH_K])
 
     def inject(self, sent):
@@ -106,25 +109,27 @@ class PipelineLake:
                 if i < len(self.neighbors):   # 动态词汇增长后邻居表可能过期
                     active.update(self.neighbors[i])
         active = np.array(sorted(active))
-        z = self.z
+        z = self.z[:self.n]
+        Ksub = self.K[:self.n, :self.n]
+        rsum = self.rowsum[:self.n]
+        om = self.omega[:self.n]
         for _ in range(PULSE_STEPS + 3):
-            dz = -self.gamma * z + 1j * self.omega * z
-            if self.neighbors is not None:
-                for i in active:
-                    s = 0.0j
-                    Ki = self.K[i]
-                    for j in self.neighbors[i]:
-                        s += Ki[j] * (z[j] - z[i])
-                    dz[i] += s
-            else:
-                dz += self.K @ z - z * self.rowsum
-            dz += drive
+            dz = -self.gamma * z + 1j * om * z
+            if self.n < 2500:
+                # 小规模：全量 BLAS gemv（实虚分离——float@complex 混合类型慢 100×）
+                dz += Ksub @ z.real + 1j * (Ksub @ z.imag) - z * rsum
+            elif self.neighbors is not None:
+                # 大规模：稀疏（矩阵化——active 子矩阵一次 BLAS——实虚分离）
+                act = active[active < self.n]
+                Ka = Ksub[np.ix_(act, act)]
+                dz[act] += Ka @ z[act].real + 1j * (Ka @ z[act].imag) - z[act] * rsum[act]
+            dz += drive[:self.n]
             z = z + dz * DT
             over = np.abs(z[active]) > 3.0
             z[active][over] = z[active][over] / np.abs(z[active][over]) * 2.0
-            self.z = z
+            self.z[:self.n] = z
             self.t += DT
-        return np.abs(self.z)
+        return np.abs(z)
 
     def learn_day(self, sents, values=None, important=None):
         for si, sent in enumerate(sents):
