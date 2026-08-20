@@ -24,6 +24,10 @@ import numpy as np
 
 RNG = np.random.default_rng(47)
 FUNC_WORDS = ["因为", "所以", "属于", "包括", "包含", "是", "很", "有"]
+# 含功能词的整体词（"但是"含"是"——误匹配排除）
+COMPOUND_WORDS = ["但是", "还是", "就是", "要是", "于是", "可是", "只是", "或是", "总是",
+                  "算是", "而是", "既是", "即使", "便是", "原是", "却是", "若是", "凡是", "也是", "更是", "确是",
+                  "于是", "于是", "关于", "对于", "由于", "在于", "在于"]
 
 def load_corpus(path, lo=3, hi=80, n=None):
     with open(path, encoding="utf-8") as f:
@@ -35,8 +39,8 @@ def load_corpus(path, lo=3, hi=80, n=None):
     return clean
 
 def match_template(sent):
-    """句子 → 模板（功能词序列 + 槽位填充）——"农业属于第一级产业" → ([X,属于,Y], [农业,第一级产业])"""
-    # 找功能词位置（最长匹配优先）
+    """句子 → 模板（功能词序列 + 槽位填充）——"农业属于第一级产业" → ([X,属于,Y], [农业,第一级产业])
+    功能词边界：排除含功能词的整体词（"但是"含"是"——误匹配）"""
     positions = []
     for fw in FUNC_WORDS:
         idx = 0
@@ -44,23 +48,33 @@ def match_template(sent):
             i = sent.find(fw, idx)
             if i < 0:
                 break
-            positions.append((i, i + len(fw), fw))
+            # 检查是否属于整体词（"但是"中的"是"——跳过）
+            is_compound = False
+            for cw in COMPOUND_WORDS:
+                ci = sent.find(cw, max(0, i - 3), min(len(sent), i + len(fw) + 3))
+                if ci >= 0 and ci <= i < ci + len(cw):
+                    is_compound = True
+                    break
+            if not is_compound:
+                positions.append((i, i + len(fw), fw))
             idx = i + 1
     if not positions:
         return None
     positions.sort()
-    # 槽位切分
+    # 槽位切分（粒度：槽位 >8 字 → 截断标记为长槽位——词组级衔接留待组合层）
     slots = []
     prev_end = 0
     tmpl = []
     for start, end, fw in positions:
         if start > prev_end:
-            slots.append(sent[prev_end:start])
+            slot = sent[prev_end:start]
+            slots.append(slot[:8] + ("…" if len(slot) > 8 else ""))
             tmpl.append("X")
         tmpl.append(fw)
         prev_end = end
     if prev_end < len(sent):
-        slots.append(sent[prev_end:])
+        slot = sent[prev_end:]
+        slots.append(slot[:8] + ("…" if len(slot) > 8 else ""))
         tmpl.append("X")
     return (tuple(tmpl), slots)
 
