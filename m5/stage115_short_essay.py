@@ -99,6 +99,17 @@ def essay_generate(w, seed, sents, min_chars=100, sides_n=8, per_side=4):
     return essay
 
 
+def punctuate(clauses, group=3):
+    """分句 → 逗号连接的分句组（句号收束）——中文短文标点：
+    '月亮升起来，星星眨眼睛，大家吃月饼。'——分句逗号/句群句号"""
+    out = []
+    for i in range(0, len(clauses), group):
+        grp = [c.rstrip("。！？") for c in clauses[i:i + group]]   # 剥分句尾标点
+        if grp:
+            out.append("，".join(grp) + "。")
+    return out
+
+
 def run():
     print("=== M5 阶段 115：短文生成（主题侧面展开——≥100 字） ===\n")
     base = os.path.dirname(__file__)
@@ -124,15 +135,15 @@ def run():
         w.learn_epoch_batch(full, B=128)
     print(f"训练完成——{time.perf_counter()-t0:.0f}s")
 
-    # ---- exp1：月亮短文 ----
-    print("\n[exp1] 月亮短文（主题侧面展开——≥100 字）:")
+    # ---- exp1：月亮短文（逗号连接——中文标点） ----
+    print("\n[exp1] 月亮短文（主题侧面展开——分句逗号连接——≥100 字）:")
     essay = essay_generate(w, "月亮", full)
     total = len("".join(essay))
-    print(f"      （{len(essay)} 句 / {total} 字——"
+    print(f"      （{len(essay)} 分句 / {total} 字——"
           f"{'≥100 字 ✓' if total >= 100 else f'还差 {100 - total} 字'}）")
     print()
-    for s in essay:
-        print(f"        {s}")
+    for line in punctuate(essay):
+        print(f"        {line}")
     print()
 
     # ---- exp2：长度验证 ----
