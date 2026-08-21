@@ -100,8 +100,10 @@ class V6Dialogue(DialogueEmerge):
             qc = q.replace("？", "").replace("?", "")
             obj = qc[:2] if len(qc) >= 2 else qc
         obj_conv = None
-        if obj and any(p in obj for p in "你我他她"):   # ② 人称对象——
-            obj_conv = obj.replace("你", "我").replace("我", "你")  # 你→我
+        if obj and "你" in obj:            # ② 人称对象——一次性映射
+            obj_conv = obj.replace("你", "我")   # 你→我（不能链式——
+        elif obj and "我" in obj:                # replace 链会换回）
+            obj_conv = obj.replace("我", "你")
         if obj[-1] in w.ci:
             i = w.ci[obj[-1]]
             cands = []
