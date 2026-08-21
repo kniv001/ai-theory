@@ -40,23 +40,98 @@ from stage117_hub_emergence import BridgeHubLake, DialogueEmerge
 class V6Bridge(V6Lake, BridgeHubLake):
     """v6 综合湖 + 跨句桥/涌现管线（stage117 复用——hub 全部涌现——
     无写死映射——C15-01 统计 + 桥检索）"""
-    pass
+
+    def q_only_words(self):
+        """q_only_words 修复：两字专属词要求**至少一字是单字专属**且
+        不含标点——排除跨词窗污染（'候休'——'时候休息'的跨词窗——
+        两字都非专属却被判专属）"""
+        base = BridgeHubLake.q_only_words(self)
+        single = {w for w in base if len(w) == 1}
+        fixed = set()
+        for w in base:
+            if len(w) == 1:
+                fixed.add(w)
+            elif any(c in single for c in w) and not any(p in w for p in "？。！，"):
+                fixed.add(w)
+        self._q_only_words = fixed
+        return fixed
 
 
 class V6Dialogue(DialogueEmerge):
     """v6 对话：stage117 涌现管线 + 主语位规则（C15-02/stage119——
-    位置统计非词表）——"在哪里/做什么"类对象 = 主语（句首）非句末"""
+    位置统计非词表）——"在哪里/做什么"类对象 = 主语（句首）非句末
+    + hub 软过滤（机制修复：涌现 hub 有时是动词（做）非类型词——
+    答案不含——hub 应作排序加分非硬滤——C13-01 关系类型）"""
 
     def parse_question(self, q):
         hub, obj = super().parse_question(q)
         if obj is None:
             return hub, obj
-        if "哪里" in q or "做什么" in q:
-            # 位置问句/动作问句——对象 = 主语（句首位——stage119
+        if "哪里" in q or "做什么" in q or "喜欢什么" in q:
+            # 位置/动作/喜欢类问句——对象 = 主语（句首位——stage119
             # subject_positions——句首率>0.5 的字——位置规则非词表）
+            # （"什么时候"除外——对象 = 句末动词——super 句末提取对）
             qc = q.replace("？", "").replace("?", "")
             obj = qc[:2] if len(qc) >= 2 else qc
         return hub, obj
+
+    def respond(self, q):
+        """hub 过滤：硬滤 + 软排序结合（机制修复链）：
+        ① obj 单字（拆残——'天空'→'天'）→ 扩展问句主题（前两字）
+        ② obj 含人称（'你们'）→ 对象检查用人称转换版（你→我——
+          答案'我们喜欢跑步'含'我'）
+        ③ hub==obj（内容字误判——'天'既是对象又是 hub）→ 降级为
+          None（hub 是对象非类型词——排序即可）"""
+        w = self.w
+        hub, obj = self.parse_question(q)
+        if obj is None:
+            return "我不明白。", None
+        p_conv = None
+        for p in q:
+            if p in "你我":
+                p_conv = "我" if p == "你" else "你"
+                break
+            if p in "他她":
+                p_conv = p
+                break
+        if hub and hub == obj:                # ③ hub 是对象（内容字）——
+            hub = None                        #   非类型词——降级排序
+        if len(obj) == 1:                     # ① 单字残——扩展主题（前两字）
+            qc = q.replace("？", "").replace("?", "")
+            obj = qc[:2] if len(qc) >= 2 else qc
+        obj_conv = None
+        if obj and any(p in obj for p in "你我他她"):   # ② 人称对象——
+            obj_conv = obj.replace("你", "我").replace("我", "你")  # 你→我
+        if obj[-1] in w.ci:
+            i = w.ci[obj[-1]]
+            cands = []
+            for s in self.sents:
+                if "？" in s or len(s) < 4 or "。" not in s:
+                    continue
+                if obj != "谁" and obj not in s:
+                    if not (obj_conv and obj_conv in s):
+                        continue              # 人称转换版检查
+                if p_conv and p_conv not in s:
+                    continue
+                idx = [w.ci[c] for c in s if c in w.ci]
+                if not idx:
+                    continue
+                rel = float(np.mean([w.KT[i, j] for j in idx]))
+                if rel > 0.003:
+                    cands.append((rel, s))
+            cands.sort(key=lambda x: -x[0])
+            if cands:
+                if hub:
+                    hc = [s for _, s in cands if hub in s]
+                    if hc:                    # 有 hub 命中候选——硬滤优先
+                        return hc[0], obj
+                    return cands[0][1], obj   # 无 hub 命中——排序 top（软）
+                return cands[0][1], obj
+        cands = [s for s in self.sents
+                 if (obj in s or (obj_conv and obj_conv in s))
+                 and "？" not in s and len(s) >= 4 and "。" in s
+                 and (p_conv is None or p_conv in s)]
+        return cands[0] if cands else "我不明白。", obj
 
 
 def extract_qa(lines):
