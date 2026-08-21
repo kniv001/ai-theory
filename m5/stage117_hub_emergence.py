@@ -47,10 +47,32 @@ class BridgeHubLake(HubLake):
         super().__init__(chars, hubs)
         self.sents = sents or []
 
+    def q_only_words(self):
+        """问句专属词（涌现——只在问句出现的词/字——什么/怎么/吗/为什么
+        ——C15-01 统计——替代写死问句标记列表）"""
+        cached = getattr(self, "_q_only_words", None)
+        if cached is not None:
+            return cached
+        q_lines = [s for s in self.sents if "？" in s]
+        st_lines = [s for s in self.sents if "？" not in s]
+        q_text = "".join(q_lines)
+        st_text = "".join(st_lines)
+        q_chars = set(q_text) - set(st_text)          # 问句专属字
+        words = set()
+        for w in q_chars:
+            words.add(w)
+        for s in q_lines:                              # 问句专属词（块级）
+            for i in range(len(s) - 1):
+                w2 = s[i:i + 2]
+                if w2 in q_text and w2 not in st_text:
+                    words.add(w2)
+        self._q_only_words = words
+        return words
+
     def learn_bridge(self, sents, B=512):
         """问答对桥沉积：问句（含问句块）→ 答句——A_diff↔B_diff 沉积到
         B 的枢纽河道——"苹果怎么样？"+"苹果很甜" → K[很][怎→很]"""
-        q_marks = ["什么", "怎么", "为什么", "吗"]
+        q_marks = [w for w in self.q_only_words() if len(w) >= 1]
         for i in range(1, len(sents)):
             A, B = sents[i - 1], sents[i]
             if not any(m in A for m in q_marks):
@@ -126,8 +148,11 @@ class DialogueEmerge:
         q = q.replace("？", "").replace("?", "")
         hub = self.w.hub_emerge(q)               # 涌现（非写死）
         rest = q
-        for m in ["为什么", "怎么样", "是什么", "什么", "怎么", "吗", "呢",
-                  "是", "你", "我", "他", "她", "我们", "你们", "他们"]:
+        # 问句专属词（涌现——什么/怎么/吗……）——替代写死列表
+        for m in sorted(self.w.q_only_words(), key=len, reverse=True):
+            rest = rest.replace(m, "")
+        # 人称（封闭语法类——妥协记录——将来词类绑定涌现）
+        for m in ["是", "你", "我", "他", "她", "我们", "你们", "他们"]:
             rest = rest.replace(m, "")
         cs = [c for c in rest if c in self.w.ci]
         if not cs:
@@ -140,6 +165,17 @@ class DialogueEmerge:
         hub, obj = self.parse_question(q)
         if obj is None:
             return "我不明白。", None
+        # 人称转换（对话惯例——你↔我/他→他/她→她——封闭语法类——
+        # 妥协记录：KT 人称桥被句内共现污染（他比你高——你-他句内 vs
+        # 你-我身份桥）——词类绑定完备后从身份对学）
+        p_conv = None
+        for p in q:
+            if p in "你我":
+                p_conv = "我" if p == "你" else "你"
+                break
+            if p in "他她":
+                p_conv = p
+                break
         if obj[-1] in w.ci:
             i = w.ci[obj[-1]]
             cands = []
@@ -147,8 +183,11 @@ class DialogueEmerge:
                 if "？" in s or len(s) < 4 or "。" not in s:
                     continue
                 if obj != "谁" and obj not in s:
-                    continue
+                    continue                             # 对象精确（谁例外——
+                                                         # 待身份机制 stage118）
                 if hub and hub not in s:         # 类型匹配（涌现 hub）
+                    continue
+                if p_conv and p_conv not in s:   # 人称一致（你→我）
                     continue
                 idx = [w.ci[c] for c in s if c in w.ci]
                 if not idx:
