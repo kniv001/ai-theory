@@ -78,37 +78,57 @@ class TextLakeApp:
 
     # ---------- 对话（涌现管线——稀疏适配） ----------
     def q_only_words(self):
-        """问句专属词（C15-01 统计——只在问句出现的词——非写死）"""
+        """问句专属词（C15-01 统计——只在问句出现的词——非写死）
+        ——两字词要求**两字都是单字专属**（'什么'✓——'么颜'✗——
+        '什么颜'跨词窗——'颜'是内容字——非问句标记——排除——
+        stage134 的'至少一字'太松——跨词窗污染对象提取）"""
         if self.q_only is not None:
             return self.q_only
         q_lines = [s for s in self.sents if "？" in s]
         st_lines = [s for s in self.sents if "？" not in s]
         q_text, st_text = "".join(q_lines), "".join(st_lines)
-        words = set(q_text) - set(st_text)                 # 单字专属
+        single = set(q_text) - set(st_text)                # 单字专属
+        words = set(single)
         for s in q_lines:                                  # 两字专属
             for i in range(len(s) - 1):
                 w2 = s[i:i + 2]
-                if w2 in q_text and w2 not in st_text:
+                if w2 in q_text and w2 not in st_text \
+                        and w2[0] in single and w2[1] in single:
                     words.add(w2)
         self.q_only = words
         return words
 
-    def hub_emerge(self, q):
+    def hub_emerge(self, q, obj=None):
         """类型词涌现（stage117——直接命中（非问句专属单字枢纽）+
-        桥检索（问句字→枢纽跨句桥 argmax））"""
+        桥检索——机制修复：直接命中须与**对象**有 K 关联（C13-01
+        关系河道——结构字'的'与对象弱关联 → 排除——类型词'是/很'
+        与对象强关联 → 保留））"""
         q_chars = [c for c in q if c in self.w.ci]
         if not q_chars:
             return None
+        oi = self.w.ci[obj[-1]] if obj and obj[-1] in self.w.ci else None
+        # 直接命中：单字枢纽 in q 非专属 且 非对象成分（'色'∈'颜色'——
+        # C30-01 成分不指代整体）且 非结构字（连接度 >85%——
+        # '的'98%/'在'91%——万能共现——非类型词——'是'83%/'很'45%
+        # 保留——类型词）
+        n = self.w.n
         direct = [h for h in self.w.hubs if len(h) == 1 and h in q
-                  and h not in self.q_only_words()]
+                  and h not in self.q_only_words()
+                  and (obj is None or h not in obj)
+                  and int((self.w.KT_sp[self.w.ci[h]] > 0).sum()) <= n * 0.85]
         if direct:
             best, best_v = None, -1.0
             for h in direct:
+                if oi is not None:         # 对象关联验证（'的'弱——
+                    rel_obj = float(self.w.KT_sp[oi, self.w.ci[h]])  # 排除）
+                    if rel_obj < 0.001:
+                        continue
                 v = sum(float(self.w.K[h][self.w.ci[c], self.w.ci[h]])
                         for c in q_chars if c in self.w.ci)
                 if v > best_v:
                     best, best_v = h, v
-            return best
+            if best is not None:
+                return best
         scores = {}
         for h in self.w.hubs:
             rep = h[0] if len(h) > 1 else h
@@ -120,9 +140,36 @@ class TextLakeApp:
                 scores[h] = v
         return max(scores, key=scores.get) if scores else None
 
+    # ---------- 身份问（stage118——'你是谁'→身份检索——跨会话） ----------
+    def identity(self, q):
+        """身份问（你是谁？→ 检索'我是X'句——KT 关联——身份湖）
+        ——调用方已保证：hub 不存在（无类型词）+ 人称问句（C21-01——
+        身份问无关系类型——是身份检索）"""
+        if "我" not in self.w.ci:
+            return None
+        cands = []
+        for s in self.sents:
+            if "我" not in s or "我是" not in s or "？" in s or len(s) < 4:
+                continue
+            idx = [self.w.ci[c] for c in s if c in self.w.ci]
+            if not idx:
+                continue
+            # 与'我'的关联（身份绑定——C21-01——自我湖河道）
+            rel = float(self.w.KT_sp[self.w.ci["我"], idx[0]])
+            cands.append((rel, s))
+        cands.sort(key=lambda x: -x[0])
+        return cands[0][1] if cands else None
+
     def chat(self, q):
-        """对话（对象提取 + hub 类型匹配 + KT_sp 关联——涌现）"""
-        hub = self.hub_emerge(q)
+        """对话（对象提取 + hub 类型匹配 + KT_sp 关联——涌现）
+        ——hub 是问句内容词（in q）时 obj 豁免（类-实例：
+        '喜欢什么颜色'→答案'蓝色'——实例不含类词——hub 已约束）"""
+        # 身份问优先（'谁'=问身份——C21-01——identity 检索'我是X'——
+        # 有则答——无则回落普通管线——'谁'是封闭问句词）
+        if "谁" in q:
+            id_ans = self.identity(q)
+            if id_ans:
+                return id_ans
         qc = q.replace("？", "").replace("?", "")
         rest = qc
         for m in sorted(self.q_only_words(), key=len, reverse=True):
@@ -133,14 +180,16 @@ class TextLakeApp:
         if not cs:
             return "我不明白。"
         obj = cs[-2] + cs[-1] if len(cs) >= 2 else cs[-1]
+        hub = self.hub_emerge(q, obj=obj)
         if obj[-1] not in self.w.ci:
             return "我不明白。"
         i = self.w.ci[obj[-1]]
+        hub_in_q = hub is not None and hub in qc
         cands = []
         for s in self.sents:
             if "？" in s or len(s) < 4:
                 continue
-            if obj not in s:
+            if not hub_in_q and obj not in s:
                 continue
             if hub and hub not in s:
                 continue
@@ -148,12 +197,11 @@ class TextLakeApp:
             if not idx:
                 continue
             rel = float(np.mean([self.w.KT_sp[i, j] for j in idx]))
-            if rel > 0.0008:               # 低阈值（wiki 全量湖 KT 稀释）
+            if rel > 0.0008:
                 cands.append((rel, s))
         cands.sort(key=lambda x: -x[0])
         return cands[0][1] if cands else "我不明白。"
 
-    # ---------- 知识问答（stage140——定义句检索） ----------
     def knowledge(self, q):
         """知识问答（X是什么？→ 定义句检索——KT 关联）"""
         qc = q.replace("？", "").replace("?", "").replace("是什么", "").strip()
@@ -331,7 +379,32 @@ class TextLakeApp:
 
     def save(self, path="lake_memory.npz"):
         save_lake(self.w, path)
-        print(f"[lake] 记忆保存 {path}")
+        # 语料持久化（跨会话检索源——对话/身份/知识——C6-03）
+        np.savez_compressed(path.replace(".npz", "_sents.npz"),
+                            sents=np.array(self.sents, dtype=object),
+                            wiki=np.array(self.sents_wiki, dtype=object))
+        print(f"[lake] 记忆保存 {path}（含语料）")
+
+    def load_sents(self, path="lake_memory.npz"):
+        """恢复持久化语料（跨会话——上次对话检索源）"""
+        spath = path.replace(".npz", "_sents.npz")
+        if os.path.exists(spath):
+            d = np.load(spath, allow_pickle=True)
+            self.sents = [str(s) for s in d["sents"]] if len(d["sents"]) else []
+            if "wiki" in d:
+                self.sents_wiki = [str(s) for s in d["wiki"]] \
+                    if len(d["wiki"]) else []
+            self._rebuild_defs()
+            print(f"[lake] 恢复语料 {len(self.sents)} 行（跨会话——"
+                  f"上次教学记得）")
+
+    def _rebuild_defs(self):
+        self.defs = []
+        src = self.sents + self.sents_wiki
+        for s in src:
+            m = re.match(r"^([一-鿿]{2,6})是", s)
+            if m:
+                self.defs.append((m.group(1), s))
 
 
 def demo():
