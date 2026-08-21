@@ -49,6 +49,8 @@ class Dialogue:
             hub = "因为"
         elif "怎么样" in q or "怎" in q:
             hub = "很"
+        elif "喜欢" in q:
+            hub = "喜欢"
         elif "是什么" in q or "是啥" in q or "是" in q:
             hub = "是"
         else:
@@ -82,6 +84,10 @@ class Dialogue:
                     continue
                 if obj != "谁" and obj not in s:     # 对象精确（谁例外）
                     continue
+                if hub and hub not in s:             # 类型匹配（C13-01——
+                    continue                          # "是什么"答含'是'句
+                                                      # ——"怎么样"答含'很'句
+                                                      # ——"为什么"答含'因为'句）
                 idx = [w.ci[c] for c in s if c in w.ci]
                 if not idx:
                     continue
@@ -92,8 +98,9 @@ class Dialogue:
             if cands:
                 self.topic = obj
                 return cands[0][1], obj
-        # 兜底：含对象的陈述句
-        cands = [s for s in self.sents if obj in s and "？" not in s and len(s) >= 4]
+        # 兜底：含对象的陈述句（类型匹配——hub 过滤）
+        cands = [s for s in self.sents if obj in s and "？" not in s and len(s) >= 4
+                 and (hub is None or hub in s)]
         if cands:
             self.topic = obj
             return cands[0], obj
