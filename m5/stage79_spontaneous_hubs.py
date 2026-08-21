@@ -197,12 +197,15 @@ class HubLake:
         for start in range(0, len(sents), B):
             batch = sents[start:start + B]
             # 动态词汇扩展（batch 内新字先入湖——持续学习——C2-06）
+            n_new = 0
             for sent in batch:
                 for c in sent:
                     if c not in self.ci:
                         self.remember(c)
+                        n_new += 1
             n = self.n
-            self._sync_total()
+            if n_new > 0:                    # 仅新字时全量 sync（性能 stage108——
+                self._sync_total()           # 无新字时 KT 增量足够）
             Z = np.zeros((len(batch), n), dtype=complex)
             drives = np.zeros((len(batch), n), dtype=complex)
             seqs = []
@@ -233,6 +236,11 @@ class HubLake:
                 for h in hit:
                     self.K[h][sub[pi], sub[pj]] += contrib[pi, pj]
                     self.K[h][sub[pj], sub[pi]] += contrib[pi, pj] * 0.3
+                # KT 增量同步（batch 内近似——避免每 batch 全量 sum——
+                # stage108 性能修复：归一化+sync 移到 epoch 末）
+                self.KT[sub[pi], sub[pj]] += contrib[pi, pj] * len(hit)
+                self.KT[sub[pj], sub[pi]] += contrib[pi, pj] * 0.3 * len(hit)
+        # 归一化 + 全量 sync（每 epoch 一次——非每 batch——性能 stage108）
         for h in self.hubs:
             self.K[h] *= (1.0 - LAMBDA_K)
             rs = self.K[h].sum(axis=1)

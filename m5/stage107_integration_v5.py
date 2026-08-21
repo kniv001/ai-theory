@@ -54,6 +54,7 @@ class V5Lake(HubLake):
         self.W_phase = np.zeros((n, n), dtype=complex)   # 相位（顺序——C13-02）
         self.W_topo = np.zeros((n, n))                   # 拓扑层（新河——C5-04）
         self.surprise = np.zeros((n, n))                 # 拓扑惊讶（C5-04）
+        self.bigram = Counter()                          # 相邻对（成分判定）
 
     def remember(self, c):
         i = super().remember(c)
@@ -76,13 +77,20 @@ class V5Lake(HubLake):
 
     def learn_epoch_batch(self, sents, B=128):
         super().learn_epoch_batch(sents, B=B)
+        # 相邻对统计（成分判定——只做一次——性能 stage108）
+        if not getattr(self, "_bigram_done", False):
+            for sent in sents:
+                for a in range(len(sent) - 1):
+                    self.bigram[sent[a:a + 2]] += 1
+            self._bigram_done = True
         # 相位配对（相邻——时序——C13-02）+ 惊讶开河（拓扑——C5-04）
         for sent in sents:
             idx = [self.ci[c] for c in sent if c in self.ci]
             for a in range(len(idx) - 1):
                 i, j = idx[a], idx[a + 1]
-                # 相位（顺序——相邻延迟 Δφ）
+                # 相位（顺序——相邻延迟 Δφ——双向——stage103 完整版）
                 self.W_phase[i, j] += EPS_K * 0.5 * np.exp(1j * np.pi / 6)
+                self.W_phase[j, i] += EPS_K * 0.5 * np.exp(-1j * np.pi / 6)
                 # 惊讶开河（新搭配——无连接 → 惊讶 → 开凿——C5-04）
                 # 只加拓扑层（独立——不污染单河道——stage107 教训）
                 if self.W_topo[i, j] < 0.02:
@@ -108,18 +116,28 @@ class V5Lake(HubLake):
         return 0
 
     def generate_memory(self, seed, sents, top_k=1):
-        """记忆检索生成（stage95——C69-01 表达=重建）——词类过滤
-        （重查 B：成分假阳性——"水"→"水果"——类不一致过滤）"""
+        """记忆检索生成（stage95——C69-01 表达=重建）——成分过滤
+        （重查 B 修复：种子是词块成分（"水"∈"水果"）——句中无独立
+        种子（被块覆盖）→ 过滤——C30-01 跨尺度解耦：词义不下沉到字）"""
         if seed[-1] not in self.ci:
             return seed
         i = self.ci[seed[-1]]
+        blocks_all = [h for h in self.hubs if len(h) > 1]
+        component = [b for b in blocks_all if seed in b and b != seed]
         cands = []
         for s in sents:
             if ("。" not in s and "？" not in s) or len(s) < 5:
                 continue
             if seed not in s:
                 continue
-            # 成分检测：种子是块内成分（"水"∈"水果"块）且种子不在块外独立
+            # 成分检测（bigram——"水"+"果"=水果——词内成分——种子后接字
+            # 强共现（≥5）→ 成分——C30-01 跨尺度解耦）
+            if len(seed) == 1:
+                k = s.find(seed)
+                if k >= 0 and k + 1 < len(s):
+                    bg = seed + s[k + 1]
+                    if self.bigram.get(bg, 0) >= 5:
+                        continue      # 种子是词内成分（水果的水）——过滤
             idx = [self.ci[c] for c in s if c in self.ci]
             score = float(np.mean([self.KT[i, j] for j in idx]))
             cands.append((score, s))
