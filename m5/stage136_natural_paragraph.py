@@ -52,12 +52,28 @@ def bridge_of(w, s, k=2):
     return core[-k:]
 
 
+def special_sides(w, topic, sents, th=0.7):
+    """特异侧面词（涌现——独占关联）：与主题共现的句中含主题比例 ≥th
+    ——'圆'独占月亮句（特异）——'亮'散布太阳/走廊句（非特异——排除）
+    ——C15-01 统计——非写死"""
+    out = []
+    for h in w.hubs:
+        if len(h) != 1 or h == topic:
+            continue
+        all_h = [s for s in sents if h in s]
+        with_t = [s for s in all_h if topic in s]
+        if len(all_h) >= 3 and len(with_t) / len(all_h) >= th:
+            out.append(h)
+    return out
+
+
 def chain_paragraph(w, topic, sents, min_chars=100, max_steps=25):
     """承接式级联段落：句末成分 → 下一句桥——句间衔接（Maimon）——
     主题锚（窗口内回主题）"""
     used = set()
     blocks_all = [h for h in w.hubs if len(h) > 1]
     ti = w.ci[topic[-1]] if topic[-1] in w.ci else None
+    sides = special_sides(w, topic, sents)      # 特异侧面（涌现——独占）
     # 起始主题句
     starters = [s for s in sents if topic in s and has_independent(w, s, topic, blocks_all)
                 and s not in used and len(s) >= 5 and "。" in s]
@@ -72,32 +88,27 @@ def chain_paragraph(w, topic, sents, min_chars=100, max_steps=25):
         bridge = bridge_of(w, cur)
         if not bridge:
             break
-        # 候选：含桥词（承接——共享成分）∪ 含主题词（主题持续——不断链）
-        # ∧ 与主题关联（内容性）∧ 未用 ∧ 非近重复
+        # 准入：含主题词 ∪ 含特异侧面词（内容性硬约束——滤'太阳很亮'/
+        # '走廊很亮'——无主题无特异侧面）——桥词只作排序（承接）
         cands = []
         for s in sents:
             if s in used or len(s) < 5 or "。" not in s:
                 continue
-            if not (bridge in s or bridge[-1] in s or topic in s):
+            if not (topic in s or any(side in s for side in sides)):
                 continue
             idx = [w.ci[c] for c in s if c in w.ci]
             if not idx or ti is None:
                 continue
             rel = float(np.mean([w.KT[ti, j] for j in idx]))
-            if rel < 0.004:                # 收紧（滤对比句——太阳/走廊）
+            if rel < 0.004:                # 收紧（滤弱关联）
                 continue
             # 近重复过滤（与已用句共享 ≥70% 字——去'月亮升起来'重复）
             sc = set(re.sub(r"[。！？，、\s]", "", s))
             if any(len(sc & set(re.sub(r"[。！？，、\s]", "", u))) >=
                    min(len(sc), len(u)) * 0.7 for u in used):
                 continue
-            # 桥强度：含完整桥词优先（强承接）——含主题词次之（持续）
-            if bridge in s:
-                bonus = 1.5
-            elif topic in s:
-                bonus = 1.0
-            else:
-                bonus = 1.2
+            # 桥强度：含完整桥词优先（强承接）——主题词次之
+            bonus = 1.5 if (bridge and bridge in s) else 1.0
             cands.append((rel * bonus, s))
         cands.sort(key=lambda x: -x[0])
         if not cands:
@@ -134,7 +145,8 @@ def run():
     med = load_corpus(os.path.join(base, "corpus_medium.txt"))
     para = load_corpus(os.path.join(base, "corpus_paragraph.txt"))
     why = load_corpus(os.path.join(base, "corpus_why.txt"))
-    full = simple + s2 + s3 + s4 + s5 + med + para + why
+    moon = load_corpus(os.path.join(base, "corpus_moon.txt"))
+    full = simple + s2 + s3 + s4 + s5 + med + para + why + moon
     blocks = extract_blocks(full)
     hubs = extract_hubs(full, blocks)
     chars = list(dict.fromkeys("".join(full)))
